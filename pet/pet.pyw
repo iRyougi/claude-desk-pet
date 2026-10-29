@@ -54,7 +54,7 @@ from effects import zz_marks  # noqa: E402
 from chatter import CHAT_SHOW_S, Context, load_lines, next_line, pick, start as start_chatter  # noqa: E402
 from interact import HEAD_SHARE, REACT_S, Touch, on_click, on_double as touch_double, on_move, on_tick  # noqa: E402
 from sessions import Session, summarize  # noqa: E402
-from commands import Command, parse as parse_command  # noqa: E402
+from commands import parse as parse_command  # noqa: E402
 from files import write_json_atomic  # noqa: E402
 from screen import choose_z, is_fullscreen  # noqa: E402
 
@@ -189,7 +189,7 @@ def read_sessions():
             with open(p, encoding='utf-8') as f:
                 data = json.load(f)
             out.append(Session(mtime=mtime, state=str(data.get('state', 'waiting')), text=str(data.get('text', '')),
-                               project=str(data.get('project', ''))))
+                               project=str(data.get('project', '')), sound=str(data.get('sound') or '')))
         except Exception:
             continue
     return out
@@ -221,6 +221,7 @@ def prepare(path, k, flip=False, patch=None):
 
 class Pet:
     def __init__(self):
+        self.started_ms = time.time() * 1000   # 启动时刻；比它早的 /pet 命令是上一个桌宠留下的，不执行
         self.settings = load_settings()
         self.root = tk.Tk()
         self.root.title('Claude 桌宠')
@@ -277,6 +278,7 @@ class Pet:
         self.fullscreen = False        # 她所在的那块屏正在全屏
         self.pending_break = None      # 全屏期间到点的休息提醒，等退出全屏再出
         self.z = None                  # 上一次设置的层级（'top' 或窗口句柄）
+        self.z_failed = None           # 贴着它设层级失败过的窗口句柄；在它身上就不再重试，直接置顶
         self.last_command = None       # 处理过的最后一条 /pet 命令的 id
 
         self.build()
@@ -290,6 +292,7 @@ class Pet:
         self.canvas.bind('<ButtonRelease-1>', self.on_release)
         self.canvas.bind('<Double-Button-1>', self.on_double)
         self.canvas.bind('<Motion>', self.on_motion)
+        self.canvas.bind('<Leave>', lambda e: self.on_leave())
         self.canvas.bind('<Button-3>', lambda e: self.menu.tk_popup(e.x_root, e.y_root))
 
         self.poll()
@@ -530,6 +533,7 @@ class Pet:
         save_settings(self.settings)
         self.break_cfg = BreakConfig.from_settings(self.settings)
         self.break_state = BreakState()  # 开关一下就重新计时；正在提醒的话也就此作罢
+        self.pending_break = None        # 全屏期间攒下的提醒也一并作废
         self.refresh()
 
     def set_work_minutes(self):
@@ -586,6 +590,7 @@ class Pet:
 
     def acknowledge_break(self):
         self.break_state = acknowledge(self.break_state, time.time())
+        self.pending_break = None        # 已经去休息了，攒着的提醒不用再出
         self.say(random.choice(ACK_LINES), 3.5, 'idle')
 
     def preview_break(self, level):
@@ -675,23 +680,32 @@ class Pet:
         if r:
             self.react(r)
 
+    def on_leave(self):
+        """鼠标离开她：摸头的轨迹作废，下次进来不会接着上次的坐标算。"""
+        self.touch, _ = on_move(self.touch, time.time(), 0, False)
+
     # ---------- 循环 ----------
     def poll(self):
-        summary = summarize(read_sessions(), time.time())
-        self.sub = summary.sub
-        latest = summary.latest
-        if latest and latest.mtime != self.last_mtime:
-            self.last_mtime_seen, self.last_mtime = self.last_mtime, latest.mtime
-            state = latest.state if latest.state in FIXED_SPRITES else 'waiting'
-            changed = state != self.state
-            self.state, self.text, self.project = state, latest.text, latest.project
-            self.state_since = time.time()
-            self.on_state_file(latest)
-            if changed:
-                self.hop_at = time.time()
-            self.refresh()
-        self.check_command()
-        self.root.after(250, self.poll)
+        try:
+            summary = summarize(read_sessions(), time.time())
+            self.sub = summary.sub
+            latest = summary.latest
+            if latest and latest.mtime != self.last_mtime:
+                self.last_mtime_seen, self.last_mtime = self.last_mtime, latest.mtime
+                state = latest.state if latest.state in FIXED_SPRITES else 'waiting'
+                changed = state != self.state
+                self.state, self.text, self.project = state, latest.text, latest.project
+                self.state_since = time.time()
+                if latest.sound in ('done', 'error') and self.last_mtime_seen:   # 刚启动时不重播旧的提示音
+                    self.play(latest.sound)
+                if changed:
+                    self.hop_at = time.time()
+                self.refresh()
+            self.check_command()
+        except Exception:
+            log_error()
+        finally:
+            self.root.after(250, self.poll)
 
     def check_command(self):
         """读插件写来的 /pet 命令；同一条只执行一次，太旧的不执行。读到写了一半的文件就等下次。"""
@@ -706,6 +720,8 @@ class Pet:
         if not cid or cid == self.last_command:
             return
         self.last_command = cid
+        if ts < self.started_ms - 1000:   # 桌宠启动之前写的命令（上一个桌宠的），不重放；留 1 秒余量给"刚启动就写入"的 show
+            return
         if time.time() * 1000 - ts > COMMAND_TTL_MS:
             return
         try:
@@ -758,16 +774,6 @@ class Pet:
         elif name == 'break-test':
             self.preview_break(1)
 
-    def on_state_file(self, latest):
-        """会话文件里带的提示音（刚启动时不重播旧的）。"""
-        try:
-            with open(max(glob.glob(os.path.join(SESSIONS, '*.json')), key=os.path.getmtime), encoding='utf-8') as f:
-                sound = json.load(f).get('sound')
-        except Exception:
-            return
-        if sound in ('done', 'error') and self.last_mtime_seen:
-            self.play(sound)
-
     def watch_surface(self):
         """每 0.25 秒：刷新所有地板，并找出"当前窗口"——前台窗口稳定 SETTLE_S 秒才算，Alt+Tab 路过的不算。"""
         try:
@@ -799,6 +805,10 @@ class Pet:
             return
         speaking = bool(self.speech and time.time() < self.speech[1])
         want = choose_z(self.motion if self.roam else None, self.break_state.level, speaking)
+        if want != 'top' and want == self.z_failed:
+            want = 'top'   # 这个窗口贴不上，别每 0.25 秒重试一遍
+        elif want != self.z_failed:
+            self.z_failed = None
         if want == 'top':
             if self.z != 'top':
                 winapi.set_topmost(self.layer.hwnd)
@@ -806,6 +816,7 @@ class Pet:
             return
         if not winapi.place_above(self.layer.hwnd, want):
             self.log_once(f'SetWindowPos 失败，退回置顶（窗口 {want}）')
+            self.z_failed = want
             winapi.set_topmost(self.layer.hwnd)
             self.z = 'top'
             return
@@ -914,8 +925,8 @@ class Pet:
         fg = winapi.foreground_frame(os.getpid())
         if fg is None:
             return False
-        _, rect, cls = fg
-        return is_fullscreen(rect, cls, winapi.monitor_rect_at(*self.feet_point()))
+        _, rect, cls, zoomed = fg
+        return is_fullscreen(rect, cls, winapi.monitor_rect_at(*self.feet_point()), zoomed)
 
     def watch_focus(self):
         try:
@@ -934,7 +945,8 @@ class Pet:
                 self.z = None   # 重新显示后层级要重新设
             if not self.fullscreen and self.pending_break is not None:
                 ev, self.pending_break = self.pending_break, None
-                self.on_break_event(ev)
+                if self.break_state.level:   # 期间已经取消/确认过的就不补发了
+                    self.on_break_event(ev)
         except Exception:
             log_error()
         finally:

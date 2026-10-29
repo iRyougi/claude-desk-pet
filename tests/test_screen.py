@@ -17,6 +17,9 @@ class FullscreenTest(unittest.TestCase):
     def test_covering_the_whole_monitor_is_fullscreen(self):
         self.assertTrue(is_fullscreen(Rect(0, 0, 1920, 1080), 'UnityWndClass', MON))
 
+    def test_zoomed_window_is_not_fullscreen(self):
+        self.assertFalse(is_fullscreen(Rect(0, 0, 1920, 1080), 'Chrome_WidgetWin_1', MON, zoomed=True))
+
     def test_slightly_larger_still_counts(self):
         self.assertTrue(is_fullscreen(Rect(-8, -8, 1928, 1088), 'Chrome_WidgetWin_1', MON))
 

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 ELLIPSIS = '…'
 PATH = re.compile(r'[^\s]*[\\/][^\s]*')   # 文字里带 / 或 \ 的一段，当作路径
+WORD_CHAR = re.compile(r'[A-Za-z0-9_]')
+WORD_TAIL = re.compile(r'[A-Za-z0-9_]+$')   # 行尾正写到一半的英文词
 Measure = Callable[[str], float]
 
 
@@ -38,14 +40,20 @@ def fit_end(text: str, measure: Measure, max_w: float) -> str:
 
 
 def _wrap(text: str, measure: Measure, max_w: float) -> list:
-    """逐字换行（中文没有空格可断）；换行后行首的空格去掉。"""
+    """逐字换行（中文没有空格可断）；换行后行首的空格去掉。英文单词不拆开：断在词中间、
+    而整个词一行放得下时，把已写的那截词挪到下一行。"""
     lines = []
     for para in text.split('\n'):
         cur = ''
         for ch in para:
             if cur and measure(cur + ch) > max_w:
-                lines.append(cur)
-                cur = '' if ch == ' ' else ch
+                m = WORD_TAIL.search(cur)
+                if m and WORD_CHAR.match(ch) and m.start() > 0 and measure(m.group(0) + ch) <= max_w:
+                    lines.append(cur[:m.start()].rstrip())
+                    cur = m.group(0) + ch
+                else:
+                    lines.append(cur)
+                    cur = '' if ch == ' ' else ch
             else:
                 cur += ch
         lines.append(cur)

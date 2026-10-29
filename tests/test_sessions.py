@@ -25,6 +25,11 @@ class SummarizeTest(unittest.TestCase):
         a, b = s(5, project='a'), s(60, state='tool', project='b')
         self.assertEqual(summarize([b, a], NOW), Summary(a, 'a · 另有 1 个在忙'))
 
+    def test_finished_sessions_count_as_waiting_not_busy(self):
+        a = s(5, project='a')
+        self.assertEqual(summarize([a, s(60, state='celebrate', project='b')], NOW).sub, 'a · b 在等你')
+        self.assertEqual(summarize([a, s(60, state='aborted', project='b')], NOW).sub, 'a · b 在等你')
+
     def test_waiting_beats_busy(self):
         a, b, c = s(5, project='a'), s(60, project='b'), s(90, state='waiting', project='c')
         self.assertEqual(summarize([a, b, c], NOW).sub, 'a · c 在等你')

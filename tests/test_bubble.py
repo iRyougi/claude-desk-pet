@@ -64,6 +64,19 @@ class LayoutTest(unittest.TestCase):
     def test_newline_starts_new_line(self):
         self.assertEqual(layout('第一行\n第二行', M, W).lines, ('第一行', '第二行'))
 
+    def test_ascii_word_is_not_split_across_lines(self):
+        lines = layout('看不懂，输入 /pet help 看用法', M, W).lines
+        for a, b in zip(lines, lines[1:]):
+            self.assertFalse(a.endswith('h') and b.startswith('elp'))
+        self.assertTrue(any('help' in ln for ln in lines))
+
+    def test_partial_word_moves_to_next_line(self):
+        self.assertEqual(layout('一二三四五六 hello', M, W).lines, ('一二三四五六', 'hello'))
+
+    def test_overlong_word_still_breaks_per_character(self):
+        lines = layout('abcdefghijklmno', M, W).lines
+        self.assertEqual(lines, ('abcdefghij', 'klmno'))
+
     def test_empty_text(self):
         self.assertEqual(layout('', M, W).lines, ('',))
 

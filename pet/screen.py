@@ -6,9 +6,9 @@ from motion import Motion, Rect
 DESKTOP_CLASSES = frozenset({'Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd'})
 
 
-def is_fullscreen(rect: Rect, cls: str, monitor: Rect) -> bool:
-    """前台窗口是不是盖满了这块显示器（连任务栏也盖住）。桌面本身不算。"""
-    if cls in DESKTOP_CLASSES:
+def is_fullscreen(rect: Rect, cls: str, monitor: Rect, zoomed: bool = False) -> bool:
+    """前台窗口是不是盖满了这块显示器（连任务栏也盖住）。桌面本身不算；最大化的窗口不算（任务栏自动隐藏时它也会盖满）。"""
+    if cls in DESKTOP_CLASSES or zoomed:
         return False
     return (rect.left <= monitor.left and rect.top <= monitor.top
             and rect.right >= monitor.right and rect.bottom >= monitor.bottom)

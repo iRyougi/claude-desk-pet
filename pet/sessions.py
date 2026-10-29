@@ -12,6 +12,7 @@ class Session:
     state: str
     text: str
     project: str
+    sound: str = ''   # 会话文件里带的提示音（done / error），没有就是空
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,7 @@ def summarize(items: list, now: float) -> Summary:
         return Summary(latest, None)
     head = latest.project or '当前会话'
     errors = [s for s in others if s.state in ('error', 'stone')]
-    waiting = [s for s in others if s.state == 'waiting']
+    waiting = [s for s in others if s.state in ('waiting', 'celebrate', 'aborted')]  # 干完了/被打断了也是在等你，不算在忙
     if errors:
         tail = f'{errors[0].project or "另一个会话"} 出错了'
     elif len(waiting) == 1:

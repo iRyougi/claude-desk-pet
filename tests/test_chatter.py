@@ -23,7 +23,7 @@ class FixedRng:
 
 
 LINES = {
-    'greet': {'morning': ['早'], 'afternoon': ['午'], 'evening': ['晚']},
+    'greet': {'morning': ['早'], 'afternoon': ['午'], 'evening': ['晚'], 'night': ['夜']},
     'meal': ['吃饭'], 'chat': ['一', '二'], 'work': ['在写 {project}'],
     'pet': ['嘿嘿'], 'poke': ['呀'], 'angry': ['哼！'], 'huff': ['哼'],
 }
@@ -42,6 +42,17 @@ class NextLineTest(unittest.TestCase):
     def test_greeting_depends_on_the_hour(self):
         self.assertEqual(next_line(start(0.0, FixedRng()), ctx(hour=14), LINES, FixedRng())[1], '午')
         self.assertEqual(next_line(start(0.0, FixedRng()), ctx(hour=21), LINES, FixedRng())[1], '晚')
+
+    def test_late_night_greeting(self):
+        for hour in (23, 0, 1, 4):
+            self.assertEqual(next_line(start(0.0, FixedRng()), ctx(hour=hour), LINES, FixedRng())[1], '夜')
+        self.assertEqual(next_line(start(0.0, FixedRng()), ctx(hour=5), LINES, FixedRng())[1], '早')
+
+    def test_unknown_placeholder_does_not_raise(self):
+        lines = {**LINES, 'chat': [], 'work': ['{hours} 小时了 {project}']}
+        c, _ = next_line(start(0.0, FixedRng()), ctx(), lines, FixedRng())
+        _, line = next_line(c, ctx(now=CHAT_EVERY[1] + 1), lines, FixedRng())
+        self.assertEqual(line, '{hours} 小时了 p')
 
     def test_quiet_means_no_line_at_all(self):
         self.assertEqual(next_line(start(0.0, FixedRng()), ctx(quiet=True), LINES, FixedRng())[1], None)
@@ -94,6 +105,41 @@ class LoadLinesTest(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(lines['chat'], ['自定义'])
         self.assertEqual(lines['poke'], DEFAULT_LINES['poke'])
+
+    def _load(self, data):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, 'lines.json')
+            with open(p, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False)
+            return load_lines(p)
+
+    def test_string_instead_of_list_falls_back(self):
+        lines, err = self._load({'chat': '不是列表', 'poke': ['好']})
+        self.assertIsNotNone(err)
+        self.assertEqual(lines['chat'], DEFAULT_LINES['chat'])
+        self.assertEqual(lines['poke'], ['好'])
+
+    def test_non_string_items_fall_back(self):
+        lines, err = self._load({'meal': ['行', 3]})
+        self.assertIsNotNone(err)
+        self.assertEqual(lines['meal'], DEFAULT_LINES['meal'])
+
+    def test_greet_missing_a_period_falls_back_for_that_period_only(self):
+        lines, err = self._load({'greet': {'morning': ['早啊'], 'afternoon': ['午啊']}})
+        self.assertIsNotNone(err)
+        self.assertEqual(lines['greet']['morning'], ['早啊'])
+        self.assertEqual(lines['greet']['evening'], DEFAULT_LINES['greet']['evening'])
+        self.assertEqual(lines['greet']['night'], DEFAULT_LINES['greet']['night'])
+
+    def test_greet_not_a_dict_falls_back(self):
+        lines, err = self._load({'greet': ['早']})
+        self.assertIsNotNone(err)
+        self.assertEqual(lines['greet'], DEFAULT_LINES['greet'])
+
+    def test_unknown_keys_ignored(self):
+        lines, err = self._load({'whatever': ['x']})
+        self.assertIsNone(err)
+        self.assertNotIn('whatever', lines)
 
     def test_bundled_file_loads_cleanly(self):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pet', 'lines.json')

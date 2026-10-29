@@ -158,14 +158,14 @@ def foreground_window(own_pid: int) -> WinInfo | None:
 
 
 def foreground_frame(own_pid: int):
-    """前台窗口的 (句柄, 外框, 类名)；没有前台窗口或是她自己时返回 None。不做"能不能坐"的过滤（全屏判断用）。"""
+    """前台窗口的 (句柄, 外框, 类名, 是否最大化)；没有前台窗口或是她自己时返回 None。不做"能不能坐"的过滤（全屏判断用）。"""
     hwnd = user32.GetForegroundWindow()
     if not hwnd or _pid(hwnd) == own_pid:
         return None
     rect = _frame(hwnd)
     if rect is None:
         return None
-    return int(hwnd), rect, _class_name(hwnd)
+    return int(hwnd), rect, _class_name(hwnd), bool(user32.IsZoomed(hwnd))
 
 
 def monitor_rect_at(x: int, y: int) -> Rect:
