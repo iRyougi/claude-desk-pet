@@ -22,7 +22,7 @@ from PIL import Image, ImageOps, ImageTk
 
 from breaks import ACK_LINES, BreakConfig, BreakEvent, BreakState, acknowledge, is_night, pick_line, step
 from motion import (
-    FIXED_SPRITES, Motion, Surface, choose_pose, choose_surface, spawn, tick, walk_bounce, walk_to,
+    FIXED_SPRITES, WALK_FRAMES, Motion, Surface, choose_pose, choose_surface, spawn, tick, walk_to,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,13 +48,13 @@ import winapi  # noqa: E402  要等 DPI 感知设好以后再导入，窗口坐�
 # 用到的全部立绘（pet/sprites/<名字>.png）
 SPRITE_FILES = sorted(set(FIXED_SPRITES.values()) | {
     'remind-1', 'remind-2', 'remind-3', 'jump', 'land', 'sit-watch', 'sit-swing-1', 'sit-swing-2',
-    'walk-1', 'walk-2', 'walk-3', 'walk-4',
+    'walk-1', 'walk-2', 'walk-3', 'walk-4', 'walk-5', 'walk-6',
 })
 SIZES = {'小': 140, '中': 190, '大': 250}  # 角色高度（100% 缩放下的像素）
 BASE_H = 400          # 立绘源图里一个站着的角色大约有多高；缩放按这个算，各姿势才能保持相对大小
 IDLE_AFTER = 10 * 60  # 等你回复超过 10 分钟就开始发呆
 SETTLE_S = 0.8        # 前台窗口稳定这么久，她才跳过去（Alt+Tab 路过的不算）
-STRIDE_PX = 250       # 走路立绘 4 帧走完一个整步，脚向前迈多远（立绘像素；量出来的，别随便改）
+STRIDE_PX = 280       # 走路立绘 6 帧走完一个整步，脚向前迈多远（立绘像素；量出来的，别随便改）
 STRIDES_PER_S = 1.2   # 每秒走几个整步；速度由它和步幅算出来，脚步和地面速度才对得上，不会打滑
 KEY = '#ff00fe'       # 透明色：画布上这个颜色的像素会被挖空
 EDGE = (58, 36, 26)   # 半透明边缘和这个深棕色混合，避免边缘发出洋红色的毛边
@@ -269,7 +269,7 @@ class Pet:
         self.line_y = self.bubble_h + round(8 * s) + self.char_h   # 站着时脚底、坐着时屁股落在窗口边上的那条线
         self.leg_room = round(0.32 * self.char_h)                  # 线下面留给垂下来的两条腿
         self.H = self.line_y + self.leg_room + round(6 * s)
-        self.px_per_frame = STRIDE_PX / 4 * self.k      # 脚步每前进这么多像素，走路动画换一帧
+        self.px_per_frame = STRIDE_PX / WALK_FRAMES * self.k  # 脚步每前进这么多像素，走路动画换一帧
         self.speed = STRIDES_PER_S * STRIDE_PX * self.k  # 像素/秒
         self.canvas.config(width=self.W, height=self.H)
         self.canvas.delete('all')
@@ -577,11 +577,8 @@ class Pet:
             self.put_window(self.motion.x, self.motion.y)
 
     def bob_for(self, file, t):
-        if file in ('stone', 'jump', 'land'):
-            return 0
-        if file.startswith('walk'):
-            # 走路：跟着脚步一起一伏（两腿交叉经过时最高），不是按时间晃
-            return -2.5 * walk_bounce(self.motion, self.px_per_frame) if self.motion else 0
+        if file in ('stone', 'jump', 'land') or file.startswith('walk'):
+            return 0  # 走路立绘自带身体的起伏，不能再叠加
         if file == 'remind-3':
             return -7 * abs(math.sin(t * 4))        # 急了：原地一下一下跺脚
         if file == 'remind-2':

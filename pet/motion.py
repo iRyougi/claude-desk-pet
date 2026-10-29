@@ -15,6 +15,7 @@ WANDER_MIN_STEP = 0.15
 LAND_POSE_S = 0.3             # 落地后摆多久的落地姿势
 KNOCK_S = 8.0                 # Claude 刚回复完，她先敲 8 秒门，再坐下晃腿
 WALK_FPS = 7.0
+WALK_FRAMES = 6               # 走路立绘一个完整步伐的帧数：落地、下压、交叉经过，左右各一遍
 SWING_S = 0.9                 # 晃腿每一帧的时长
 
 # 原来的状态 → 立绘（不走动模式，以及"站起来"的事件姿势）
@@ -205,11 +206,6 @@ def gait_progress(m: Motion, px_per_frame: float) -> float:
     return m.x * m.face / px_per_frame
 
 
-def walk_bounce(m: Motion, px_per_frame: float) -> float:
-    """身体的起伏，0 到 1：脚落地那一帧最低，两腿交叉经过的那一帧最高。"""
-    return abs(math.sin(gait_progress(m, px_per_frame) * math.pi / 2))
-
-
 def _fixed(state: str) -> str:
     return FIXED_SPRITES.get(state, 'smile')
 
@@ -230,7 +226,7 @@ def choose_pose(m: Motion | None, now: float, state: str, state_age: float, remi
         return Pose('land', m.face < 0, 1.0)
     if m.mode == 'walk':
         u = gait_progress(m, px_per_frame) if px_per_frame else now * WALK_FPS
-        return Pose(f'walk-{1 + math.floor(u) % 4}', m.face < 0, 1.0)
+        return Pose(f'walk-{1 + math.floor(u) % WALK_FRAMES}', m.face < 0, 1.0)
     if speech:
         return Pose(_fixed(speech), False, 1.0)
     if remind:

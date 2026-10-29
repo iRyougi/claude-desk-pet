@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from PIL import Image
 
 from chroma import key_green, pixels, split_valleys
+from fragments import drop_fragments, split_by_components
+from outline import add_outline
 from tone import Tone, adjust, measure
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -36,7 +38,7 @@ class Sheet:
 
 # 单张图大约 1086x1448，角色约 1360 高 → 成品约 400 高
 SHEETS = (
-    Sheet('行走', ('walk-1', 'walk-2', 'walk-3', 'walk-4'), 0.58),
+    Sheet('六帧', ('walk-1', 'walk-2', 'walk-3', 'walk-4', 'walk-5', 'walk-6'), 0.72),
     Sheet('双坐姿', ('sit-swing-1', 'sit-swing-2'), 0.436),
     Sheet('悠然', ('sit-watch',), 0.294),
     Sheet('品茶', ('remind-1',), 0.294),
@@ -98,11 +100,14 @@ def align_on_head(frames: list) -> list:
 
 
 def cut_frames(rgba: Image.Image, count: int) -> list:
-    """切成 count 帧：上下用所有帧的并集（保持脚底对齐），左右让每一帧的头对齐。"""
-    cells = [rgba.crop((x0, 0, x1, rgba.height)) for x0, x1 in split_valleys(column_coverage(rgba), count)]
-    boxes = [solid_bbox(c) for c in cells]
+    """切成 count 帧：先按连通的人形分（不会切到靴尖、发梢），分不开再按列切；上下用所有帧的并集（保持脚底对齐），左右让每一帧的头对齐。"""
+    frames = split_by_components(rgba, count)
+    if frames is None:  # 相邻帧的头发连在一起，分不开：退回按列切，再清掉带进来的碎片
+        cells = [rgba.crop((x0, 0, x1, rgba.height)) for x0, x1 in split_valleys(column_coverage(rgba), count)]
+        frames = [drop_fragments(c) for c in cells]
+    boxes = [solid_bbox(f) for f in frames]
     top, bottom = min(b[1] for b in boxes), max(b[3] for b in boxes)
-    return align_on_head([c.crop((0, top, c.width, bottom)) for c in cells])
+    return align_on_head([f.crop((0, top, f.width, bottom)) for f in frames])
 
 
 def pad(im: Image.Image) -> Image.Image:
@@ -118,7 +123,7 @@ def render(sheet: Sheet, rgba: Image.Image) -> list:
         frames = cut_frames(rgba, len(sheet.names))
     written = []
     for name, frame in zip(sheet.names, frames):
-        out = pad(resize_premultiplied(frame, sheet.scale))
+        out = add_outline(pad(resize_premultiplied(frame, sheet.scale)))  # 先留边距，勾边才不会被切掉
         out.save(os.path.join(OUT_DIR, name + '.png'), optimize=True)
         written.append((name, out.size))
     return written
@@ -131,7 +136,9 @@ def reference_tone() -> Tone:
 
 def describe(tone: Tone) -> str:
     w = tuple(round(c) for c in tone.white)
-    return f'头发 H{tone.hair_h:.3f} S{tone.hair_s:.3f} V{tone.hair_v:.3f}，白色 {w}'
+    dark = f'{tone.dark_s:.2f}' if tone.dark_s is not None else '-'
+    skin = f'{tone.skin_s:.2f}' if tone.skin_s is not None else '-'
+    return f'头发 H{tone.hair_h:.3f} S{tone.hair_s:.3f} V{tone.hair_v:.3f}，白色 {w}，深色S {dark}，肤色S {skin}'
 
 
 def main(argv: list) -> int:

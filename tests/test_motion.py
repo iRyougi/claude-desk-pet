@@ -7,7 +7,7 @@ from dataclasses import replace
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pet'))
 
 from motion import (  # noqa: E402
-    Motion, Rect, Surface, WinInfo, choose_pose, choose_surface, spawn, tick, walk_bounce, walk_to,
+    Motion, Rect, Surface, WinInfo, choose_pose, choose_surface, spawn, tick, walk_to,
 )
 
 S = Surface(key=1, left=100.0, right=900.0, y=300.0, kind='window')
@@ -169,10 +169,10 @@ class ChoosePoseTest(unittest.TestCase):
         self.assertEqual(self.pose(m, now=m.landed_at + 0.1).file, 'land')
         self.assertTrue(self.pose(m, now=m.landed_at + 5).file.startswith('sit'))
 
-    def test_walking_cycles_through_four_frames_and_flips_when_going_left(self):
+    def test_walking_cycles_through_six_frames_and_flips_when_going_left(self):
         m = walk_to(self.perched(0.8), 0.2, 1.0)
         files = {self.pose(m, now=t / 20).file for t in range(40)}
-        self.assertEqual(files, {'walk-1', 'walk-2', 'walk-3', 'walk-4'})
+        self.assertEqual(files, {f'walk-{i}' for i in range(1, 7)})
         self.assertTrue(self.pose(m).flip)
         m = walk_to(self.perched(0.2), 0.8, 1.0)
         self.assertFalse(self.pose(m).flip)
@@ -187,20 +187,13 @@ class ChoosePoseTest(unittest.TestCase):
         b = self.pose(m, now=99.0, px_per_frame=50.0).file
         self.assertEqual(a, b)  # 站着不动的那一刻，不管过了多久都是同一帧——脚不会在原地滑
 
-    def test_one_frame_per_stride_quarter_walking_right(self):
-        files = [self.pose(self.walking(x, 1), px_per_frame=50.0).file for x in (0, 50, 100, 150, 200)]
-        self.assertEqual(files, ['walk-1', 'walk-2', 'walk-3', 'walk-4', 'walk-1'])
+    def test_one_frame_per_stride_sixth_walking_right(self):
+        files = [self.pose(self.walking(x, 1), px_per_frame=50.0).file for x in range(0, 350, 50)]
+        self.assertEqual(files, ['walk-1', 'walk-2', 'walk-3', 'walk-4', 'walk-5', 'walk-6', 'walk-1'])
 
     def test_gait_runs_forward_when_walking_left(self):
-        files = [self.pose(self.walking(x, -1), px_per_frame=50.0).file for x in (200, 150, 100, 50)]
-        self.assertEqual(files, ['walk-1', 'walk-2', 'walk-3', 'walk-4'])
-
-    def test_bounce_peaks_on_the_passing_frames(self):
-        up = [walk_bounce(self.walking(x, 1), 50.0) for x in (0, 50, 100, 150)]
-        self.assertAlmostEqual(up[0], 0.0, places=6)   # 脚落地的一帧最低
-        self.assertAlmostEqual(up[1], 1.0, places=6)   # 两腿交叉经过的一帧最高
-        self.assertAlmostEqual(up[2], 0.0, places=6)
-        self.assertAlmostEqual(up[3], 1.0, places=6)
+        files = [self.pose(self.walking(x, -1), px_per_frame=50.0).file for x in (300, 250, 200, 150, 100, 50)]
+        self.assertEqual(files, [f'walk-{i}' for i in range(1, 7)])
 
     def test_working_states_sit_and_watch(self):
         for state in ('thinking', 'reading'):

@@ -98,5 +98,77 @@ class AdjustTest(unittest.TestCase):
         self.assertEqual(list(im.tobytes()), list(before.tobytes()))
 
 
+
+def spread_sheet(hair_values: list, dark=None, skin=None) -> Image.Image:
+    """头发的饱和度/明度各不相同的一张图；可选地加一块深色和一块皮肤色。"""
+    im = Image.new('RGBA', (len(hair_values), 3), (0, 0, 0, 0))
+    for x, (s, v) in enumerate(hair_values):
+        for y in range(3):
+            im.putpixel((x, y), hsv(0.05, s, v))
+    extra = Image.new('RGBA', (60, 3), (0, 0, 0, 0))
+    for x in range(20):
+        for y in range(3):
+            extra.putpixel((x, y), NEW_WHITE)
+            if dark:
+                extra.putpixel((x + 20, y), hsv(0.03, dark, 0.15))
+            if skin:
+                extra.putpixel((x + 40, y), hsv(0.06, skin, 0.96))
+    out = Image.new('RGBA', (im.width + 60, 3), (0, 0, 0, 0))
+    out.paste(im, (0, 0))
+    out.paste(extra, (im.width, 0))
+    return out
+
+
+def values(im: Image.Image, pick) -> list:
+    out = []
+    for x in range(im.width):
+        r, g, b, a = im.getpixel((x, 1))
+        if a:
+            h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+            if pick(h, s, v):
+                out.append((s, v))
+    return out
+
+
+def is_hair(h, s, v):
+    return 0.015 <= h <= 0.11 and s >= 0.5 and v >= 0.45
+
+
+class DistributionTest(unittest.TestCase):
+    """平均值对上了不够：原图头发是一大块明度 0.97 的平涂橙，新图主色只有 0.92，要整条分布对齐。"""
+
+    def setUp(self):
+        self.new = [(0.62 + 0.30 * i / 99, 0.62 + 0.30 * i / 99) for i in range(100)]   # S、V 都在 0.62–0.92
+        self.old = [(0.64 + 0.13 * i / 99, 0.70 + 0.28 * i / 99) for i in range(100)]   # S 窄，V 到 0.98
+
+    def test_hair_saturation_and_value_ranges_follow_the_reference(self):
+        src, ref = spread_sheet(self.new), spread_sheet(self.old)
+        out = adjust(src, measure([src]), measure([ref]))
+        got = values(out, is_hair)
+        s = sorted(x[0] for x in got)
+        v = sorted(x[1] for x in got)
+        self.assertAlmostEqual(s[-5], 0.77, delta=0.04)   # 新图 S 最高到 0.92，要压到原图的 0.77 附近
+        self.assertAlmostEqual(v[-5], 0.98, delta=0.04)   # 新图 V 最高 0.92，要提亮到原图的 0.98 附近
+        self.assertAlmostEqual(v[4], 0.70, delta=0.04)
+
+    def test_dark_pixels_lose_their_saturation(self):
+        src, ref = spread_sheet(self.new, dark=0.62), spread_sheet(self.old, dark=0.35)
+        out = adjust(src, measure([src]), measure([ref]))
+        r, g, b, _ = out.getpixel((len(self.new) + 25, 1))
+        self.assertAlmostEqual(colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)[1], 0.35, delta=0.04)
+
+    def test_skin_saturation_follows_the_reference(self):
+        src, ref = spread_sheet(self.new, skin=0.20), spread_sheet(self.old, skin=0.15)
+        out = adjust(src, measure([src]), measure([ref]))
+        r, g, b, _ = out.getpixel((len(self.new) + 45, 1))
+        self.assertAlmostEqual(colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)[1], 0.15, delta=0.03)
+
+    def test_missing_dark_or_skin_in_either_set_changes_nothing(self):
+        src = spread_sheet(self.new, dark=0.62)
+        ref = spread_sheet(self.old)              # 参考图里没有深色，没法对齐
+        out = adjust(src, measure([src]), measure([ref]))
+        self.assertEqual(out.getpixel((len(self.new) + 25, 1)), src.getpixel((len(self.new) + 25, 1)))
+
+
 if __name__ == '__main__':
     unittest.main()
