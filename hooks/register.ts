@@ -21,6 +21,25 @@ const EMPTY: Totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 // 读资料类工具 → 记笔记表情；其余 → 敲键盘
 const READING = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'NotebookRead'])
 
+// /pet 的子命令（只认英文）；参数是否合法由桌宠检查，打错了它会在气泡里说
+const PET_COMMANDS = new Set(['', 'show', 'hide', 'home', 'size', 'follow', 'roam', 'sound', 'chat', 'break', 'rest', 'quit'])
+
+const PET_HELP = [
+  '/pet 用法：',
+  '/pet                      召唤桌宠；被藏起来了就显示出来',
+  '/pet hide                 藏起来',
+  '/pet home                 回到当前窗口，并重新开始自动跟随',
+  '/pet size small|medium|large   调大小',
+  '/pet follow on|off        自动跟着当前窗口',
+  '/pet roam on|off          跟着窗口走动',
+  '/pet sound on|off         提示音',
+  '/pet chat on|off          闲聊',
+  '/pet break on|off|30|45|50|60|90   休息提醒开关 / 间隔（分钟）',
+  '/pet break test           试一下休息提醒',
+  '/pet rest                 我去休息了',
+  '/pet quit                 退出桌宠',
+].join('\n')
+
 // 会话级的变量（重载 mod 时会在 session.start 里重新算）
 let runDir = ''
 let petFile = ''
@@ -76,6 +95,13 @@ async function launchPet($: EngineInterface) {
     $.ui.log(`桌宠启动失败：${String(err)}`, { to: 'debug' })
     await $.fs.write(`${runDir}/mod-launch.log`, `启动 python 失败：${String(err)}`).catch(() => {})
   }
+}
+
+// 把 /pet 的参数交给桌宠：写进 command.json，桌宠每 0.25 秒读一次，按 id 去重，30 秒以上的旧命令不执行
+async function sendPetCommand($: EngineInterface, args: string) {
+  const ts = await $.clock.now()
+  const id = `${ts}-${Math.random().toString(36).slice(2, 8)}`
+  await $.fs.write(`${runDir}/command.json`, JSON.stringify({ id, args, ts }))
 }
 
 async function refreshStatus($: EngineInterface) {
@@ -161,7 +187,12 @@ export const register: Register = on => {
     }
 
     await $.command.register({ name: 'token-stats', description: '查看本会话和本项目累计的 token 用量、缓存命中率' })
-    await $.command.register({ name: 'pet', description: '重新召唤桌宠悬浮窗' })
+    await $.command.register({
+      name: 'pet',
+      description: '召唤和控制桌宠（/pet help 看用法）',
+      argumentHint: '[hide|home|size|follow|roam|sound|chat|break|rest|quit|help]',
+      immediate: true,
+    })
 
     await pet($, 'waiting', '我来啦～')
     void launchPet($)
@@ -227,8 +258,20 @@ export const register: Register = on => {
   on('command.run', { command: 'token-stats' }, async ($, e, next) => ({ text: await statsText($) }))
 
   on('command.run', { command: 'pet' }, async ($, e, next) => {
-    await launchPet($)
-    await pet($, 'waiting', '我在这儿～')
-    return { text: '桌宠已召唤（如果它本来就开着，就不会再开第二个）。' }
+    const args = e.args.trim()
+    const head = args.split(/\s+/)[0].toLowerCase()
+    if (!PET_COMMANDS.has(head)) return { text: PET_HELP }
+    try {
+      await launchPet($) // 已经开着的话不会开第二个
+      await sendPetCommand($, args)
+    } catch (err) {
+      $.ui.log(`桌宠命令失败：${String(err)}`, { to: 'debug' })
+      return { text: '桌宠没有响应，看看 ~/.claude/desk-pet/mod-launch.log' }
+    }
+    if (args === '') {
+      await pet($, 'waiting', '我在这儿～')
+      return { text: '桌宠已召唤（如果它本来就开着，就不会再开第二个）。输入 /pet help 看还能做什么。' }
+    }
+    return { text: `已告诉桌宠：/pet ${args}` }
   })
 }
