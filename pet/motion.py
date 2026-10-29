@@ -28,6 +28,9 @@ GRAVITY = 2600.0              # 像素/秒²（100% 缩放）
 TERMINAL = 2600.0             # 最大下落速度，像素/秒
 AIR_X = 1.6                   # 被甩出去时水平速度的衰减，1/秒
 LAND_TOL = 8.0                # 下落时，地板在这么近的范围内也算接住（窗口可能刚好动了一下）
+TRANSITION_S = 0.24           # 坐下/站起的过渡一共多久（两帧各一半）
+SLEEP_S = 1.2                 # 打瞌睡两帧交替的间隔
+SWING_HOLD_S = 0.3            # 被拎着甩动停下后，身体还歪着多久才回正
 
 # 原来的状态 → 立绘（不走动模式，以及"站起来"的事件姿势）
 FIXED_SPRITES = {
@@ -43,7 +46,10 @@ FIXED_SPRITES = {
 }
 EVENT_STANDING = {'celebrate': 'confetti', 'error': 'panic', 'aborted': 'guilty', 'stone': 'stone'}
 # 立绘从上往下数，"屁股坐在窗口边上"那条线的位置（占立绘高度的比例）；站着的立绘是 1.0（脚底）
-ANCHOR = {'sit-swing-1': 0.70, 'sit-swing-2': 0.70, 'sit-watch': 0.70, 'typing': 0.80}
+ANCHOR = {'sit-swing-1': 0.70, 'sit-swing-2': 0.70, 'sit-watch': 0.70, 'typing': 0.80,
+          'sit-down-1': 1.0, 'sit-down-2': 0.85, 'sleep-1': 0.70, 'sleep-2': 0.70}
+SITTING = frozenset({'sit-swing-1', 'sit-swing-2', 'sit-watch', 'typing', 'sleep-1', 'sleep-2'})
+AIRBORNE = frozenset({'jump', 'fall', 'held', 'held-swing', 'land'})   # 这些姿势切换时不播坐下/站起过渡
 
 
 @dataclass(frozen=True)
@@ -108,6 +114,20 @@ class Pose:
     file: str      # pet/sprites/<file>.png
     flip: bool     # 是否水平翻转
     anchor: float  # 立绘里"接触地板"的那条线（占高度的比例）
+
+
+@dataclass(frozen=True)
+class Swing:
+    """被拎着时身体往哪边甩：-1 是往左拖（身体落在右边），1 是往右拖，0 不甩。"""
+    direction: int = 0
+    until: float = 0.0
+
+
+@dataclass(frozen=True)
+class Posture:
+    """她现在算坐着还是站着，从什么时候开始的；用来播坐下/站起的过渡。"""
+    sitting: bool = False
+    since: float = -1e9
 
 
 def _ground(work: Rect, within: Rect | None = None, owner: object = None, margin: int = 24) -> Surface:
@@ -288,6 +308,29 @@ def tick(m: Motion, surfaces: Sequence[Surface], now: float, dt: float, *, speed
     return _perch(m, s, now, can_wander, rng)
 
 
+def swing_step(s: Swing, vx: float, now: float, threshold: float) -> Swing:
+    """拖得比 threshold 快就按拖动方向歪；慢下来以后再歪 SWING_HOLD_S 秒才回正。"""
+    if abs(vx) >= threshold:
+        return Swing(1 if vx > 0 else -1, now + SWING_HOLD_S)
+    return s if now < s.until else Swing()
+
+
+def settle(p: Posture, target: Pose, now: float) -> tuple:
+    """坐下/站起的过渡：目标姿势从站变坐（或反过来）时，先播 TRANSITION_S 秒的过渡帧，站起就倒着播。
+    在空中的姿势（被拎着、下落、跳）直接切，不过渡。"""
+    if target.file in AIRBORNE:
+        return Posture(False), target
+    want = target.file in SITTING
+    if want != p.sitting:
+        p = Posture(want, now)
+    age = now - p.since
+    if age >= TRANSITION_S:
+        return p, target
+    frames = ('sit-down-1', 'sit-down-2') if p.sitting else ('sit-down-2', 'sit-down-1')
+    file = frames[min(1, int(age / (TRANSITION_S / 2)))]
+    return p, Pose(file, target.flip, ANCHOR[file])
+
+
 def gait_progress(m: Motion, px_per_frame: float) -> float:
     """走了多远就是走到第几帧：往右走，x 变大帧数往前；往左走（立绘已翻转），x 变小帧数同样往前。"""
     return m.x * m.face / px_per_frame
@@ -298,17 +341,25 @@ def _fixed(state: str) -> str:
 
 
 def choose_pose(m: Motion | None, now: float, state: str, state_age: float, remind: int = 0,
-                speech: str | None = None, roam: bool = True, px_per_frame: float | None = None) -> Pose:
+                speech: str | None = None, roam: bool = True, px_per_frame: float | None = None,
+                swing: int = 0) -> Pose:
     """根据"在干嘛"挑立绘。roam=False 是不走动模式：还是原来的状态立绘，全部贴着底边。
 
     px_per_frame：走路时脚步每前进多少像素换一帧。给了就按走过的距离换帧（脚才不会在地上打滑），
     不给就按时间换帧。
+    swing：被拎着时身体往哪边甩（见 Swing）。
     """
     if not roam or m is None:
         file = _fixed(speech) if speech else f'remind-{remind}' if remind else _fixed(state)
         return Pose(file, False, 1.0)
-    if m.mode in ('held', 'fall', 'hop'):
-        return Pose('jump', m.face < 0, 1.0)  # 被拎着、掉下去、跳过去，都是四肢悬空的这一张
+    if m.mode == 'held':
+        if swing:
+            return Pose('held-swing', swing > 0, 1.0)  # 立绘画的是往左拖（身体落在右边）；往右拖就翻过来
+        return Pose('held', False, 1.0)
+    if m.mode == 'fall':
+        return Pose('fall', m.face < 0, 1.0)
+    if m.mode == 'hop':
+        return Pose('jump', m.face < 0, 1.0)
     if now - m.landed_at < LAND_POSE_S:
         return Pose('land', m.face < 0, 1.0)
     if m.mode == 'walk':
@@ -322,6 +373,9 @@ def choose_pose(m: Motion | None, now: float, state: str, state_age: float, remi
         return Pose(EVENT_STANDING[state], False, 1.0)
     if state == 'waiting' and state_age < KNOCK_S:
         return Pose('knock', False, 1.0)
+    if state == 'idle':  # 等你回复太久：坐着打瞌睡，头一点一点
+        file = f'sleep-{1 + int(now / SLEEP_S) % 2}'
+        return Pose(file, False, ANCHOR[file])
     if state in ('thinking', 'reading'):
         return Pose('sit-watch', m.frac < 0.5, ANCHOR['sit-watch'])  # 在左半边就朝右看，朝着窗口里面
     if state == 'tool':

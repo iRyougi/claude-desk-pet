@@ -7,8 +7,8 @@ from dataclasses import replace
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pet'))
 
 from motion import (  # noqa: E402
-    Motion, Rect, Surface, WinInfo, build_surfaces, choose_pose, choose_surface, drop, hold, hop_to,
-    release, spawn, tick, walk_to,
+    Motion, Pose, Posture, Rect, Surface, Swing, WinInfo, build_surfaces, choose_pose, choose_surface, drop, hold,
+    hop_to, release, settle, spawn, swing_step, tick, walk_to,
 )
 
 S = Surface(key=1, left=100.0, right=900.0, y=300.0, kind='window')
@@ -316,10 +316,25 @@ class ChoosePoseTest(unittest.TestCase):
     def pose(self, m, state='waiting', age=100.0, now=50.0, **kw):
         return choose_pose(m, now, state, age, **kw)
 
-    def test_in_the_air_she_uses_the_jump_pose(self):
-        self.assertEqual(self.pose(drop(500.0, 0.0, 0.0)).file, 'jump')
-        self.assertEqual(self.pose(hold(self.perched(), 5.0, 5.0)).file, 'jump')
+    def test_in_the_air_each_situation_has_its_own_pose(self):
+        self.assertEqual(self.pose(drop(500.0, 0.0, 0.0)).file, 'fall')
+        self.assertEqual(self.pose(hold(self.perched(), 5.0, 5.0)).file, 'held')
         self.assertEqual(self.pose(hop_to(self.perched(), G, 1.0)).file, 'jump')
+
+    def test_held_and_swung_she_leans_against_the_drag(self):
+        held = hold(self.perched(), 5.0, 5.0)
+        left, right = self.pose(held, swing=-1), self.pose(held, swing=1)
+        self.assertEqual((left.file, left.flip), ('held-swing', False))   # 立绘画的就是往左拖
+        self.assertEqual((right.file, right.flip), ('held-swing', True))
+
+    def test_idle_she_dozes_on_two_alternating_frames(self):
+        files = [self.pose(self.perched(), state='idle', now=t * 0.3).file for t in range(20)]
+        self.assertEqual(set(files), {'sleep-1', 'sleep-2'})
+        self.assertEqual(self.pose(self.perched(), state='idle').anchor, 0.70)
+
+    def test_dozing_ignores_the_leg_swing(self):
+        m = replace(self.perched(), swing_until=100.0)
+        self.assertTrue(self.pose(m, state='idle', now=50.0).file.startswith('sleep'))
 
     def test_after_landing_she_shows_the_land_pose_briefly(self):
         m = step(drop(500.0, 100.0, 0.0, rng=rng()), [S, G], 1.0, dt=0.5)
@@ -367,14 +382,14 @@ class ChoosePoseTest(unittest.TestCase):
 
     def test_while_swinging_the_two_frames_alternate_slowly(self):
         m = replace(self.perched(), swing_until=100.0)
-        files = [self.pose(m, state='idle', now=t / 10).file for t in range(0, 40)]
+        files = [self.pose(m, state='waiting', now=t / 10).file for t in range(0, 40)]
         self.assertEqual(set(files), {'sit-swing-1', 'sit-swing-2'})
         changes = sum(1 for a, b in zip(files, files[1:]) if a != b)
         self.assertLessEqual(changes, 5)  # 4 秒里最多换 5 次，不是一直抖
 
     def test_swing_ends_when_the_timer_runs_out(self):
         m = replace(self.perched(), swing_until=10.0)
-        self.assertEqual(self.pose(m, state='idle', now=20.0).file, 'sit-swing-1')
+        self.assertEqual(self.pose(m, state='waiting', now=20.0).file, 'sit-swing-1')
 
     def test_event_states_stand_up_on_the_edge(self):
         for state, file in (('celebrate', 'confetti'), ('error', 'panic'), ('aborted', 'guilty'),
@@ -408,6 +423,63 @@ class MotionIsImmutableTest(unittest.TestCase):
         tick(m, [G], 1.0, DT)
         self.assertEqual((m.mode, m.x, m.y, m.frac), snapshot)
         self.assertIsInstance(m, Motion)
+
+
+SIT = Pose('sit-swing-1', False, 0.70)
+STAND = Pose('knock', False, 1.0)
+AIR = Pose('held', False, 1.0)
+
+
+class DragSwingTest(unittest.TestCase):
+    def test_fast_drag_leans_and_holds_briefly_after_stopping(self):
+        s = swing_step(Swing(), -400.0, 1.0, 250.0)
+        self.assertEqual(s.direction, -1)
+        self.assertEqual(swing_step(s, 0.0, 1.2, 250.0).direction, -1)   # 停下后 0.3 秒内还歪着
+        self.assertEqual(swing_step(s, 0.0, 1.31, 250.0).direction, 0)
+
+    def test_slow_drag_does_not_lean(self):
+        self.assertEqual(swing_step(Swing(), 100.0, 1.0, 250.0), Swing())
+
+    def test_reversing_the_drag_flips_the_lean(self):
+        s = swing_step(Swing(), -400.0, 1.0, 250.0)
+        self.assertEqual(swing_step(s, 500.0, 1.1, 250.0).direction, 1)
+
+
+class SettleTest(unittest.TestCase):
+    def seated(self):
+        p, _ = settle(Posture(), SIT, 0.0)
+        p, _ = settle(p, SIT, 1.0)
+        return p
+
+    def test_sitting_down_plays_two_frames_then_the_target(self):
+        p, a = settle(Posture(), SIT, 10.0)
+        _, b = settle(p, SIT, 10.15)
+        _, c = settle(p, SIT, 10.3)
+        self.assertEqual((a.file, b.file, c.file), ('sit-down-1', 'sit-down-2', 'sit-swing-1'))
+        self.assertEqual((a.anchor, b.anchor), (1.0, 0.85))
+
+    def test_standing_up_plays_them_backwards(self):
+        p, a = settle(self.seated(), STAND, 5.0)
+        _, b = settle(p, STAND, 5.15)
+        _, c = settle(p, STAND, 5.3)
+        self.assertEqual((a.file, b.file, c.file), ('sit-down-2', 'sit-down-1', 'knock'))
+
+    def test_picked_up_while_sitting_skips_the_transition(self):
+        p, a = settle(self.seated(), AIR, 2.0)
+        self.assertEqual(a.file, 'held')
+        self.assertFalse(p.sitting)
+
+    def test_switching_between_sitting_poses_needs_no_transition(self):
+        _, a = settle(self.seated(), Pose('typing', False, 0.80), 2.0)
+        self.assertEqual(a.file, 'typing')
+
+    def test_standing_stays_standing_without_transition(self):
+        _, a = settle(Posture(), STAND, 0.0)
+        self.assertEqual(a.file, 'knock')
+
+    def test_transition_keeps_the_target_flip(self):
+        _, a = settle(Posture(), Pose('sit-watch', True, 0.70), 0.0)
+        self.assertEqual((a.file, a.flip), ('sit-down-1', True))
 
 
 if __name__ == '__main__':
