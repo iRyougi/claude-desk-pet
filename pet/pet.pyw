@@ -7,14 +7,18 @@ import glob
 import json
 import math
 import os
+import random
 import socket
 import subprocess
 import sys
 import time
 import tkinter as tk
 import winsound
+from dataclasses import replace
 
 from PIL import Image, ImageTk
+
+from breaks import ACK_LINES, BreakConfig, BreakEvent, BreakState, acknowledge, is_night, pick_line, step
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOUNDS = os.path.join(os.path.dirname(HERE), 'sounds')
@@ -25,7 +29,7 @@ SETTINGS = os.path.join(RUN_DIR, 'settings.json')
 # 只允许开一个桌宠：占住一个本地端口，占不到说明已经有一个在跑
 try:
     _lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    _lock.bind(('127.0.0.1', 47321))
+    _lock.bind(('127.0.0.1', int(os.environ.get('DESK_PET_PORT', 47321))))  # 环境变量只给调试用
 except OSError:
     sys.exit(0)
 
@@ -45,6 +49,9 @@ SPRITES = {
     'error': 'panic',
     'aborted': 'guilty',
     'stone': 'stone',
+    'remind1': 'remind-1',  # 休息提醒：温柔 / 催促 / 急了
+    'remind2': 'remind-2',
+    'remind3': 'remind-3',
 }
 SIZES = {'小': 140, '中': 190, '大': 250}  # 角色高度（100% 缩放下的像素）
 IDLE_AFTER = 10 * 60  # 等你回复超过 10 分钟就开始发呆
@@ -103,6 +110,22 @@ def claude_running():
         return 'claude.exe' in out.lower()
     except Exception:
         return True
+
+
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [('cbSize', wt.UINT), ('dwTime', wt.DWORD)]
+
+
+kernel32.GetTickCount.restype = wt.DWORD
+
+
+def idle_seconds():
+    """距离上一次键盘/鼠标操作过了多少秒；系统接口失败时当作"刚操作过"。"""
+    info = LASTINPUTINFO()
+    info.cbSize = ctypes.sizeof(LASTINPUTINFO)
+    if not user32.GetLastInputInfo(ctypes.byref(info)):
+        return 0.0
+    return ((kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000
 
 
 def load_settings():
@@ -176,7 +199,13 @@ class Pet:
         self.hop_at = time.time()
         self.hidden = False
         self.drag = None
+        self.moved = False
+        self.press_at = (0, 0)
         self.last_alive = time.time()
+        self.break_cfg = BreakConfig.from_settings(self.settings)
+        self.break_state = BreakState()
+        self.remind_text = ''
+        self.speech = None  # (气泡文字, 截止时刻, 立绘状态或 None)：临时插话，盖过其他文字
 
         self.build()
         self.place_window()
@@ -192,6 +221,7 @@ class Pet:
         self.animate()
         self.watch_focus()
         self.watch_claude()
+        self.watch_break()
 
     # ---------- 布局 ----------
     def build(self):
@@ -227,14 +257,32 @@ class Pet:
         self.bubble_text = tid
 
     def display_text(self):
+        if self.speech and time.time() < self.speech[1]:
+            return self.speech[0]
+        if self.break_state.level:
+            return self.remind_text
         if self.effective_state() == 'idle':
             return '在发呆～ zZ'
         return self.text
 
     def effective_state(self):
-        if self.state == 'waiting' and time.time() - self.state_since > IDLE_AFTER:
+        now = time.time()
+        if self.speech and now < self.speech[1] and self.speech[2]:
+            return self.speech[2]
+        if self.break_state.level:  # 休息提醒盖过 Claude 的状态，直到你点她或者走开休息
+            return f'remind{self.break_state.level}'
+        if self.state == 'waiting' and now - self.state_since > IDLE_AFTER:
             return 'idle'
         return self.state
+
+    def refresh(self):
+        self.canvas.itemconfig(self.sprite, image=self.images[self.effective_state()])
+        self.draw_bubble()
+
+    def say(self, text, seconds, sprite=None):
+        self.speech = (text, time.time() + seconds, sprite)
+        self.hop_at = time.time()
+        self.refresh()
 
     def place_window(self):
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
@@ -255,6 +303,20 @@ class Pet:
         self.sound_var = tk.BooleanVar(value=self.settings.get('sound', True))
         self.menu.add_checkbutton(label='提示音', variable=self.sound_var, command=self.toggle_sound)
         self.menu.add_separator()
+        self.break_var = tk.BooleanVar(value=self.break_cfg.enabled)
+        self.menu.add_checkbutton(label='休息提醒', variable=self.break_var, command=self.toggle_break)
+        work_menu = tk.Menu(self.menu, tearoff=0, font=self.font)
+        self.work_var = tk.StringVar(value=f'{self.break_cfg.work_min:g}')
+        for minutes in (30, 45, 50, 60, 90):
+            work_menu.add_radiobutton(label=f'{minutes} 分钟', variable=self.work_var, value=str(minutes),
+                                      command=self.set_work_minutes)
+        self.menu.add_cascade(label='多久提醒一次', menu=work_menu)
+        preview_menu = tk.Menu(self.menu, tearoff=0, font=self.font)
+        for level, name in ((1, '温柔'), (2, '催促'), (3, '急了')):
+            preview_menu.add_command(label=name, command=lambda lv=level: self.preview_break(lv))
+        self.menu.add_cascade(label='试一下提醒', menu=preview_menu)
+        self.menu.add_command(label='我去休息了', command=self.acknowledge_break)
+        self.menu.add_separator()
         self.menu.add_command(label='退出桌宠', command=self.root.destroy)
 
     def resize(self):
@@ -273,18 +335,70 @@ class Pet:
         self.settings['sound'] = self.sound_var.get()
         save_settings(self.settings)
 
+    def toggle_break(self):
+        self.settings['breakEnabled'] = self.break_var.get()
+        save_settings(self.settings)
+        self.break_cfg = BreakConfig.from_settings(self.settings)
+
+    def set_work_minutes(self):
+        self.settings['breakWork'] = float(self.work_var.get())
+        save_settings(self.settings)
+        self.break_cfg = BreakConfig.from_settings(self.settings)
+
+    # ---------- 休息提醒 ----------
+    def play(self, name):
+        if not self.sound_var.get():
+            return
+        try:
+            winsound.PlaySound(os.path.join(SOUNDS, name + '.wav'),
+                               winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+        except Exception:
+            pass
+
+    def on_break_event(self, ev):
+        self.remind_text = pick_line(ev.level, is_night(time.localtime().tm_hour), last=self.remind_text)
+        self.speech = None
+        self.hop_at = time.time()
+        self.refresh()
+        self.play('error' if ev.level >= 3 else 'done')
+
+    def acknowledge_break(self):
+        self.break_state = acknowledge(self.break_state, time.time())
+        self.say(random.choice(ACK_LINES), 3.5, 'idle')
+
+    def preview_break(self, level):
+        now = time.time()
+        self.break_state = replace(self.break_state, level=level, reminded_at=now, last_event=now)
+        self.on_break_event(BreakEvent(level))
+
+    def watch_break(self):
+        try:
+            had = self.break_state.level
+            self.break_state, ev = step(self.break_state, time.time(), idle_seconds(), self.break_cfg)
+            if ev:
+                self.on_break_event(ev)
+            elif had and not self.break_state.level:
+                self.refresh()  # 你走开休息了（或者关掉了提醒），她就不催了
+        finally:
+            self.root.after(2000, self.watch_break)
+
     # ---------- 鼠标 ----------
     def on_press(self, e):
         self.drag = (e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y())
+        self.press_at, self.moved = (e.x_root, e.y_root), False
 
     def on_drag(self, e):
         if self.drag:
+            if abs(e.x_root - self.press_at[0]) + abs(e.y_root - self.press_at[1]) > 4:
+                self.moved = True
             self.root.geometry(f'+{e.x_root - self.drag[0]}+{e.y_root - self.drag[1]}')
 
     def on_release(self, e):
         self.drag = None
         self.settings['x'], self.settings['y'] = self.root.winfo_x(), self.root.winfo_y()
         save_settings(self.settings)
+        if not self.moved and self.break_state.level:
+            self.acknowledge_break()  # 提醒的时候点她一下，就是"我去休息了"
 
     def on_double(self, e):
         # 双击：把 Claude 窗口叫到前台
@@ -308,12 +422,8 @@ class Pet:
             self.project = data.get('project', '')
             self.state_since = time.time()
             sound = data.get('sound')
-            if sound in ('done', 'error') and self.sound_var.get() and self.last_mtime_seen:  # 刚启动时不重播旧提示音
-                try:
-                    winsound.PlaySound(os.path.join(SOUNDS, sound + '.wav'),
-                                       winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
-                except Exception:
-                    pass
+            if sound in ('done', 'error') and self.last_mtime_seen:  # 刚启动时不重播旧提示音
+                self.play(sound)
             if changed:
                 self.hop_at = time.time()
             self.canvas.itemconfig(self.sprite, image=self.images[self.effective_state()])
@@ -325,10 +435,17 @@ class Pet:
 
     def animate(self):
         t = time.time()
+        if self.speech and t >= self.speech[1]:
+            self.speech = None
+            self.refresh()
         st = self.effective_state()
         s = self.scale
         if st == 'stone':
             bob = 0
+        elif st == 'remind3':
+            bob = -7 * abs(math.sin(t * 4))   # 急了：原地一下一下跺脚
+        elif st == 'remind2':
+            bob = 2.5 * math.sin(t * 7)       # 催促：着急地晃
         elif st == 'tool':
             bob = 2.5 * math.sin(t * 9)   # 敲键盘：快速小幅抖动
         elif st == 'error':
@@ -344,7 +461,8 @@ class Pet:
         self.root.after(33, self.animate)
 
     def watch_focus(self):
-        should_hide = self.hide_var.get() and claude_is_foreground() and self.drag is None
+        should_hide = (self.hide_var.get() and claude_is_foreground() and self.drag is None
+                       and not self.break_state.level)  # 正在提醒休息的时候不躲
         if should_hide and not self.hidden:
             self.root.withdraw()
             self.hidden = True
