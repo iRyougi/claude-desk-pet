@@ -705,10 +705,10 @@ class Pet:
             text = self.text + '.' * (int(t * 2.5) % 3 + 1)  # “思考中” 后面的点点点一跳一跳
         image = compose(img, sprite_bottom, self.bubble_for(text), self.bubble_h + self.bubble_dy,
                         self.min_w, self.H)
-        if pose.file.startswith('sleep'):  # z Z 从头顶右边冒出来
+        if pose.file.startswith('sleep'):  # z Z 从头顶右上方冒出来（离开头发，免得压在黑色蝴蝶结上看不见）
             top = sprite_bottom - img.height
-            draw_marks(image, zz_marks(t, self.scale), image.width // 2 + round(img.width * 0.22),
-                       top + round(img.height * 0.12))
+            draw_marks(image, zz_marks(t, self.scale), image.width // 2 + round(img.width * 0.36),
+                       top + round(img.height * 0.02))
         self.fit_width(image.width)
         if self.roam and self.motion and self.drag is None:
             self.put_window(self.motion.x, self.motion.y)

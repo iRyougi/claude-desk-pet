@@ -103,6 +103,13 @@ class DrawMarksTest(unittest.TestCase):
         draw_marks(im, [Mark('Z', 0.0, 0.0, 0, 20)], 30, 30)
         self.assertIsNone(im.getchannel('A').getbbox())
 
+    def test_mark_has_a_light_fill_and_dark_outline(self):
+        im = Image.new('RGBA', (80, 80), (0, 0, 0, 0))
+        draw_marks(im, [Mark('Z', 0.0, 0.0, 255, 30)], 20, 20)
+        px = [p for p in im.convert('RGBA').get_flattened_data() if p[3] == 255]
+        self.assertTrue(any(min(p[:3]) > 200 for p in px))   # 浅色的字
+        self.assertTrue(any(max(p[:3]) < 90 for p in px))    # 深色的描边
+
 
 if __name__ == '__main__':
     unittest.main()

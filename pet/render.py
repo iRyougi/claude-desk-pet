@@ -98,10 +98,12 @@ def compose(sprite: Image.Image, sprite_bottom: int, bubble: Image.Image | None,
 
 
 def draw_marks(image: Image.Image, marks: list, x: float, y: float) -> None:
-    """把 z Z 这类小记号画到 image 上（就地修改）。(x, y) 是记号飘出来的起点，marks 来自 effects。"""
+    """把 z Z 这类小记号画到 image 上（就地修改）。(x, y) 是记号飘出来的起点，marks 来自 effects。
+    浅色字、深色描边，什么背景上都看得清。"""
     layer = Image.new('RGBA', image.size, (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
     for m in marks:
         if m.alpha > 0:
-            d.text((x + m.dx, y + m.dy), m.text, font=_font(m.size), fill=INK[:3] + (m.alpha,))
+            d.text((x + m.dx, y + m.dy), m.text, font=_font(m.size), fill=PAPER[:3] + (m.alpha,),
+                   stroke_width=max(1, round(m.size / 10)), stroke_fill=INK[:3] + (m.alpha,))
     image.alpha_composite(layer)
