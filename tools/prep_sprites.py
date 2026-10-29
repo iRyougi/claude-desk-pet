@@ -1,6 +1,8 @@
 """把 AI 生成的绿幕立绘处理成透明 PNG，放进 pet/sprites/。
 
-用法：python tools/prep_sprites.py <绿幕图所在文件夹>
+用法：python tools/prep_sprites.py <绿幕图所在文件夹> [--raw]
+
+默认会把新立绘的发色和白色调到和原来的立绘一致；加 --raw 则保持 AI 出图的原色。
 
 源文件按文件名里的关键字匹配（见 SHEETS）。SCALE 是"源图一个像素 → 成品多少像素"，
 按头的大小对齐，让各个姿势在桌面上看起来一样大。
@@ -14,11 +16,14 @@ from dataclasses import dataclass
 from PIL import Image
 
 from chroma import key_green, pixels, split_valleys
+from tone import Tone, adjust, measure
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(ROOT, 'pet', 'sprites')
 PAD = 6
 ALPHA_SOLID = 40  # 透明度超过这个值才算"有角色"
+# 色调基准：原来的立绘（stone 是灰石头、confetti 带彩带，都不参与）
+ORIGINALS = ('smile', 'smile-closed', 'typing', 'notes', 'knock', 'panic', 'confident', 'guilty')
 
 
 @dataclass(frozen=True)
@@ -88,9 +93,7 @@ def pad(im: Image.Image) -> Image.Image:
     return out
 
 
-def process(sheet: Sheet, folder: str) -> list:
-    src = find_source(folder, sheet.keyword)
-    rgba = key_green(Image.open(src))
+def render(sheet: Sheet, rgba: Image.Image) -> list:
     if len(sheet.names) == 1:
         frames = [rgba.crop(solid_bbox(rgba))]
     else:
@@ -98,20 +101,37 @@ def process(sheet: Sheet, folder: str) -> list:
     written = []
     for name, frame in zip(sheet.names, frames):
         out = pad(resize_premultiplied(frame, sheet.scale))
-        path = os.path.join(OUT_DIR, name + '.png')
-        out.save(path, optimize=True)
+        out.save(os.path.join(OUT_DIR, name + '.png'), optimize=True)
         written.append((name, out.size))
     return written
 
 
+def reference_tone() -> Tone:
+    """原来那 10 张立绘（去掉石头和撒花）的色调，新立绘要向它看齐。"""
+    return measure(Image.open(os.path.join(OUT_DIR, n + '.png')) for n in ORIGINALS)
+
+
+def describe(tone: Tone) -> str:
+    w = tuple(round(c) for c in tone.white)
+    return f'头发 H{tone.hair_h:.3f} S{tone.hair_s:.3f} V{tone.hair_v:.3f}，白色 {w}'
+
+
 def main(argv: list) -> int:
-    if len(argv) != 2:
+    raw = '--raw' in argv
+    args = [a for a in argv[1:] if a != '--raw']
+    if len(args) != 1:
         print(__doc__)
         return 2
-    folder = argv[1]
     os.makedirs(OUT_DIR, exist_ok=True)
-    for sheet in SHEETS:
-        for name, size in process(sheet, folder):
+    keyed = [(s, key_green(Image.open(find_source(args[0], s.keyword)))) for s in SHEETS]
+    if not raw:
+        src, ref = measure(k for _, k in keyed), reference_tone()
+        print('新立绘', describe(src))
+        print('原立绘', describe(ref))
+        keyed = [(s, adjust(k, src, ref)) for s, k in keyed]
+        print('调整后', describe(measure(k for _, k in keyed)))
+    for sheet, rgba in keyed:
+        for name, size in render(sheet, rgba):
             print(f'{name:12s} {size[0]}x{size[1]}')
     return 0
 
