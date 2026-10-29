@@ -404,6 +404,12 @@ class ChoosePoseTest(unittest.TestCase):
     def test_speech_sprite_overrides_when_perched(self):
         self.assertEqual(self.pose(self.perched(), speech='idle').file, 'smile')
 
+    def test_reactions_use_their_own_sprites(self):
+        self.assertEqual(self.pose(self.perched(), speech='pet').file, 'shy')
+        self.assertEqual(self.pose(self.perched(), speech='poke').file, 'poked')
+        self.assertEqual(self.pose(self.perched(), speech='angry').file, 'remind-3')
+        self.assertEqual(choose_pose(None, 0.0, 'tool', 0.0, speech='poke', roam=False).file, 'poked')
+
     def test_fixed_mode_uses_the_original_state_sprites_bottom_aligned(self):
         for state, file in (('thinking', 'smile-closed'), ('tool', 'typing'), ('reading', 'notes'),
                             ('waiting', 'knock'), ('idle', 'smile')):

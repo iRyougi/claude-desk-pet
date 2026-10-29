@@ -45,6 +45,7 @@ FIXED_SPRITES = {
     'stone': 'stone',
 }
 EVENT_STANDING = {'celebrate': 'confetti', 'error': 'panic', 'aborted': 'guilty', 'stone': 'stone'}
+REACTION_SPRITES = {'pet': 'shy', 'poke': 'poked', 'angry': 'remind-3'}   # 摸头、戳、连戳生气时的立绘
 # 立绘从上往下数，"屁股坐在窗口边上"那条线的位置（占立绘高度的比例）；站着的立绘是 1.0（脚底）
 ANCHOR = {'sit-swing-1': 0.70, 'sit-swing-2': 0.70, 'sit-watch': 0.70, 'typing': 0.80,
           'sit-down-1': 1.0, 'sit-down-2': 0.85, 'sleep-1': 0.70, 'sleep-2': 0.70}
@@ -337,7 +338,7 @@ def gait_progress(m: Motion, px_per_frame: float) -> float:
 
 
 def _fixed(state: str) -> str:
-    return FIXED_SPRITES.get(state, 'smile')
+    return REACTION_SPRITES.get(state) or FIXED_SPRITES.get(state, 'smile')
 
 
 def choose_pose(m: Motion | None, now: float, state: str, state_age: float, remind: int = 0,
