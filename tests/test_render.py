@@ -13,7 +13,7 @@ STYLE = BubbleStyle(font=ImageFont.load_default(13), small=ImageFont.load_defaul
 
 
 def alphas(im):
-    return list(im.getchannel('A').getdata())
+    return list(im.getchannel('A').tobytes())
 
 
 class BubbleImageTest(unittest.TestCase):
