@@ -18,7 +18,7 @@ import traceback
 import winsound
 from dataclasses import replace
 
-from PIL import Image, ImageOps, ImageTk
+from PIL import Image, ImageOps
 
 from breaks import ACK_LINES, BreakConfig, BreakEvent, BreakState, acknowledge, is_night, pick_line, step
 from motion import (
@@ -39,12 +39,14 @@ try:
 except OSError:
     sys.exit(0)
 
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(1)
-except Exception:
-    pass
+import dpi  # noqa: E402
+
+dpi.enable()
 
 import winapi  # noqa: E402  要等 DPI 感知设好以后再导入，窗口坐标才是真实像素
+from bubble import layout  # noqa: E402
+from layered import LayeredWindow  # noqa: E402
+from render import BubbleStyle, bubble_image, compose  # noqa: E402
 
 # 用到的全部立绘（pet/sprites/<名字>.png）
 SPRITE_FILES = sorted(set(FIXED_SPRITES.values()) | {
@@ -57,9 +59,9 @@ IDLE_AFTER = 10 * 60  # 等你回复超过 10 分钟就开始发呆
 SETTLE_S = 0.8        # 前台窗口稳定这么久，她才跳过去（Alt+Tab 路过的不算）
 STRIDE_PX = 280       # 走路立绘 6 帧走完一个整步，脚向前迈多远（立绘像素；量出来的，别随便改）
 STRIDES_PER_S = 1.2   # 每秒走几个整步；速度由它和步幅算出来，脚步和地面速度才对得上，不会打滑
-KEY = '#ff00fe'       # 透明色：画布上这个颜色的像素会被挖空
-EDGE = (58, 36, 26)   # 半透明边缘和这个深棕色混合，避免边缘发出洋红色的毛边
-ORANGE = '#e8743b'
+BUBBLE_MAX_W = 260    # 气泡最宽多少像素（100% 缩放）；放不下就换行，最多两行
+BUBBLE_AREA = 66      # 角色头顶留给气泡的高度（两行正文 + 尖角）
+BUBBLE_CACHE = 64     # 最多缓存多少张气泡图（文件名一直在变，不能无限存）
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -182,17 +184,12 @@ def read_latest():
 
 
 def prepare(path, k, flip=False):
-    """按 k 倍缩放立绘（可水平翻转），并把透明部分处理成透明色。"""
+    """按 k 倍缩放立绘（可水平翻转），保留透明度。按预乘透明度缩放，边缘才不会发黑。"""
     im = Image.open(path).convert('RGBA')
     if flip:
         im = ImageOps.mirror(im)
-    im = im.resize((max(1, round(im.width * k)), max(1, round(im.height * k))), Image.LANCZOS)
-    bg = Image.new('RGBA', im.size, EDGE + (255,))
-    solid = Image.alpha_composite(bg, im)
-    key = Image.new('RGBA', im.size, KEY)
-    mask = im.getchannel('A').point(lambda a: 255 if a >= 110 else 0)
-    key.paste(solid, (0, 0), mask)
-    return key.convert('RGB')
+    size = (max(1, round(im.width * k)), max(1, round(im.height * k)))
+    return im.convert('RGBa').resize(size, Image.LANCZOS).convert('RGBA')
 
 
 class Pet:
@@ -202,11 +199,10 @@ class Pet:
         self.root.title('Claude 桌宠')
         self.root.overrideredirect(True)
         self.root.attributes('-topmost', True)
-        self.root.attributes('-transparentcolor', KEY)
-        self.root.configure(bg=KEY)
-        self.scale = self.root.winfo_fpixels('1i') / 96
+        self.scale = dpi.scale_at(self.settings.get('x', 0), self.settings.get('y', 0))
 
-        self.canvas = tk.Canvas(self.root, bg=KEY, highlightthickness=0, bd=0)
+        # 画布只用来接鼠标事件；看得见的画面每帧由 render 合成、交给分层窗口
+        self.canvas = tk.Canvas(self.root, bg='black', highlightthickness=0, bd=0)
         self.canvas.pack()
         self.font = ('Microsoft YaHei UI', 10)
         self.small = ('Microsoft YaHei UI', 8)
@@ -242,6 +238,8 @@ class Pet:
 
         self.build()
         self.place_window()
+        self.root.update_idletasks()
+        self.layer = LayeredWindow(user32.GetParent(self.root.winfo_id()))
         self.make_menu()
 
         self.canvas.bind('<ButtonPress-1>', self.on_press)
@@ -262,50 +260,52 @@ class Pet:
         s = self.scale
         self.k = SIZES.get(self.settings.get('size', '中'), 190) * s / BASE_H
         self.cache = {}
+        self.bubble_cache = {}
+        self.style = BubbleStyle.make(s)
         sizes = []
         for name in SPRITE_FILES:
             with Image.open(os.path.join(HERE, 'sprites', name + '.png')) as im:
                 sizes.append(im.size)
         self.char_h = round(max(h for _, h in sizes) * self.k)
         self.char_w = round(max(w for w, _ in sizes) * self.k)
-        self.bubble_h = round(52 * s)
-        self.W = max(self.char_w, round(190 * s))
+        self.bubble_h = round(BUBBLE_AREA * s)
+        self.min_w = max(self.char_w, round(190 * s))
+        self.W = self.min_w
         self.line_y = self.bubble_h + round(8 * s) + self.char_h   # 站着时脚底、坐着时屁股落在窗口边上的那条线
         self.leg_room = round(0.32 * self.char_h)                  # 线下面留给垂下来的两条腿
         self.H = self.line_y + self.leg_room + round(6 * s)
         self.px_per_frame = STRIDE_PX / WALK_FRAMES * self.k  # 脚步每前进这么多像素，走路动画换一帧
         self.speed = STRIDES_PER_S * STRIDE_PX * self.k  # 像素/秒
         self.canvas.config(width=self.W, height=self.H)
-        self.canvas.delete('all')
         self.pose_key = None
         self.bubble_dy = 0
-        pose = self.current_pose()
-        self.sprite = self.canvas.create_image(self.W // 2, self.line_y, anchor='s',
-                                               image=self.sprite_image(pose.file, pose.flip))
-        self.draw_bubble()
 
     def sprite_image(self, file, flip):
         key = (file, flip)
         if key not in self.cache:
-            self.cache[key] = ImageTk.PhotoImage(prepare(os.path.join(HERE, 'sprites', file + '.png'), self.k, flip))
+            self.cache[key] = prepare(os.path.join(HERE, 'sprites', file + '.png'), self.k, flip)
         return self.cache[key]
 
-    def draw_bubble(self):
-        c, s, dy = self.canvas, self.scale, self.bubble_dy
-        c.delete('bubble')
-        text = self.display_text()
-        tid = c.create_text(self.W // 2, round(20 * s) + dy, text=text, font=self.font, fill='#3a2a1a', tags='bubble')
-        x0, y0, x1, y1 = c.bbox(tid)
-        pad = round(10 * s)
-        x0, x1 = max(1, x0 - pad), min(self.W - 2, x1 + pad)
-        y0, y1 = 2 + dy, round(38 * s) + dy
-        r = round(12 * s)
-        pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1, x1 - r, y1,
-               self.W // 2 + round(8 * s), y1, self.W // 2, y1 + round(10 * s), self.W // 2 - round(4 * s), y1,
-               x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
-        c.create_polygon(pts, smooth=True, fill='#fffaf3', outline=ORANGE, width=max(2, round(2 * s)), tags='bubble')
-        c.tag_raise(tid)
-        self.bubble_text = tid
+    def bubble_for(self, text):
+        """这句话的气泡图；同一句话只画一次。"""
+        if text not in self.bubble_cache:
+            if len(self.bubble_cache) >= BUBBLE_CACHE:
+                self.bubble_cache = {}
+            # 10 是气泡左右内边距（见 render.bubble_image），扣掉它，气泡外宽才不会超过 BUBBLE_MAX_W
+            max_w = round(BUBBLE_MAX_W * self.scale) - 2 * self.style.px(10)
+            lay = layout(text, self.style.measure, max_w)
+            self.bubble_cache[text] = bubble_image(lay, self.style)
+        return self.bubble_cache[text]
+
+    def fit_width(self, width):
+        """气泡变宽变窄时窗口跟着变，脚底的中心点不动。"""
+        if width == self.W:
+            return
+        x = self.root.winfo_x() + (self.W - width) // 2
+        self.W = width
+        self.canvas.config(width=width)
+        self.root.geometry(f'{width}x{self.H}+{x}+{self.root.winfo_y()}')
+        self.win_pos = None
 
     def display_text(self):
         if self.speech and time.time() < self.speech[1]:
@@ -333,24 +333,19 @@ class Pet:
                            px_per_frame=self.px_per_frame)
 
     def apply_pose(self):
-        """按当前情况换立绘；坐着的时候气泡跟着往下挪，贴着头顶。返回 (姿势, 立绘高度)。"""
+        """按当前情况挑立绘；坐着的时候气泡跟着往下挪，贴着头顶。返回 (姿势, 立绘图)。"""
         pose = self.current_pose()
         key = (pose.file, pose.flip)
         img = self.sprite_image(*key)
         if key != self.pose_key:
-            self.canvas.itemconfig(self.sprite, image=img)
             if self.pose_key and pose.anchor != self.anchor:
                 self.hop_at = time.time()  # 站起来/坐下去：身体落点差了一截，蹦一下盖过那一下突兀的跳变
             self.pose_key, self.anchor = key, pose.anchor
-        dy = round((1 - pose.anchor) * img.height())
-        if dy != self.bubble_dy:
-            self.bubble_dy = dy
-            self.draw_bubble()
-        return pose, img.height()
+        self.bubble_dy = round((1 - pose.anchor) * img.height)
+        return pose, img
 
     def refresh(self):
-        self.apply_pose()
-        self.draw_bubble()
+        self.apply_pose()  # 画面每帧都会重新合成，这里只需要更新姿势
 
     def say(self, text, seconds, sprite=None):
         self.speech = (text, time.time() + seconds, sprite)
@@ -406,11 +401,30 @@ class Pet:
     def resize(self):
         self.settings['size'] = self.size_var.get()
         save_settings(self.settings)
+        self.rebuild()
+
+    def rebuild(self):
+        """换大小或换缩放后重建立绘；脚底位置不变。"""
         bottom_x = self.root.winfo_x() + self.W // 2
         bottom_y = self.root.winfo_y() + self.line_y
         self.build()
         self.win_pos = None  # 走动模式下，下一帧会按她的位置重新摆
         self.root.geometry(f'{self.W}x{self.H}+{bottom_x - self.W // 2}+{bottom_y - self.line_y}')
+
+    def check_dpi(self):
+        """她落在缩放不同的另一块屏上了：按那块屏的缩放重建。拖着、在空中的时候不换，免得大小一路跳。"""
+        if self.drag is not None:
+            return
+        if self.roam and self.motion:
+            if self.motion.mode not in ('perch', 'walk'):
+                return
+            x, y = self.motion.x, self.motion.y - 1
+        else:
+            x, y = self.root.winfo_x() + self.W // 2, self.root.winfo_y() + self.line_y - 1
+        scale = dpi.scale_at(round(x), round(y))
+        if abs(scale - self.scale) > 0.01:
+            self.scale = scale
+            self.rebuild()
 
     def toggle_roam(self):
         self.roam = self.roam_var.get()
@@ -584,6 +598,7 @@ class Pet:
                 self.target_hwnd, self.candidate = win.hwnd, None
             if self.target_hwnd and winapi.window_info(self.target_hwnd) is None:
                 self.target_hwnd = win.hwnd if win else None  # 当前窗口关了/最小化了
+            self.check_dpi()
         except Exception:
             log_error()
         finally:
@@ -608,7 +623,7 @@ class Pet:
         return (self.drag is None and not self.break_state.level and not self.speech_state()
                 and self.claude_state() in ('waiting', 'idle'))
 
-    def move(self, now, dt):
+    def update_motion(self, now, dt):
         follow = self.follow_surface()
         if self.motion is None:
             ground = choose_surface(None, self.work_areas[0], need_above=self.line_y)
@@ -619,8 +634,6 @@ class Pet:
                 m = hop_to(m, follow, now, self.scale)  # 你切到了别的窗口：她跳过去
             self.motion = tick(m, self.fresh_surfaces(follow), now, dt, speed=self.speed, scale=self.scale,
                                can_wander=self.can_wander())
-        if self.drag is None and not self.hidden:
-            self.put_window(self.motion.x, self.motion.y)
 
     def bob_for(self, file, t):
         if file in ('stone', 'jump', 'land') or file.startswith('walk'):
@@ -643,18 +656,24 @@ class Pet:
         self.last_frame = t
         if self.speech and t >= self.speech[1]:
             self.speech = None
-            self.draw_bubble()
         if self.roam:
-            self.move(t, dt)
-        pose, h = self.apply_pose()
+            self.update_motion(t, dt)
+        pose, img = self.apply_pose()
         since = t - self.hop_at
         hop = -14 * math.sin(since / 0.28 * math.pi) if since < 0.28 else 0  # 换状态时小跳一下
-        y = self.line_y + round((1 - pose.anchor) * h) + round((self.bob_for(pose.file, t) + hop) * self.scale)
-        self.canvas.coords(self.sprite, self.W // 2, y)
+        sprite_bottom = (self.line_y + round((1 - pose.anchor) * img.height)
+                         + round((self.bob_for(pose.file, t) + hop) * self.scale))
+        text = self.display_text()
         if (self.claude_state() == 'thinking' and self.text.endswith('中')
                 and not self.break_state.level and not self.speech_state()):
-            # “思考中” 后面的点点点一跳一跳
-            self.canvas.itemconfig(self.bubble_text, text=self.text + '.' * (int(t * 2.5) % 3 + 1))
+            text = self.text + '.' * (int(t * 2.5) % 3 + 1)  # “思考中” 后面的点点点一跳一跳
+        image = compose(img, sprite_bottom, self.bubble_for(text), self.bubble_h + self.bubble_dy,
+                        self.min_w, self.H)
+        self.fit_width(image.width)
+        if self.roam and self.motion and self.drag is None and not self.hidden:
+            self.put_window(self.motion.x, self.motion.y)
+        if not self.hidden and not self.layer.show(image):
+            raise OSError('UpdateLayeredWindow 失败')  # animate() 会记一次日志
 
     def animate(self):
         try:
