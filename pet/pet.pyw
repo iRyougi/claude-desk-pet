@@ -49,12 +49,15 @@ from layered import LayeredWindow  # noqa: E402
 from render import BubbleStyle, bubble_image, compose, draw_marks  # noqa: E402
 from blink import closed as eyes_closed, start as start_blink, step as step_blink  # noqa: E402
 from effects import zz_marks  # noqa: E402
+from chatter import CHAT_SHOW_S, Context, load_lines, next_line, pick, start as start_chatter  # noqa: E402
+from interact import HEAD_SHARE, REACT_S, Touch, on_click, on_double as touch_double, on_move, on_tick  # noqa: E402
+from sessions import Session, summarize  # noqa: E402
 
 # 用到的全部立绘（pet/sprites/<名字>.png）
 SPRITE_FILES = sorted(set(FIXED_SPRITES.values()) | {
     'remind-1', 'remind-2', 'remind-3', 'jump', 'land', 'sit-watch', 'sit-swing-1', 'sit-swing-2',
     'walk-1', 'walk-2', 'walk-3', 'walk-4', 'walk-5', 'walk-6',
-    'sit-down-1', 'sit-down-2', 'held', 'held-swing', 'fall', 'sleep-1', 'sleep-2',
+    'sit-down-1', 'sit-down-2', 'held', 'held-swing', 'fall', 'sleep-1', 'sleep-2', 'shy', 'poked',
 })
 SIZES = {'小': 140, '中': 190, '大': 250}  # 角色高度（100% 缩放下的像素）
 BASE_H = 400          # 立绘源图里一个站着的角色大约有多高；缩放按这个算，各姿势才能保持相对大小
@@ -67,6 +70,7 @@ BUBBLE_AREA = 66      # 角色头顶留给气泡的高度（两行正文 + 尖�
 BUBBLE_CACHE = 64     # 最多缓存多少张气泡图（文件名一直在变，不能无限存）
 SWING_V = 250         # 拖得比这快（像素/秒，100% 缩放），被拎着的她就往反方向歪
 PATCHES = os.path.join(HERE, 'sprites', 'patches.json')   # 眨眼补丁的位置（tools/blink_patch.py 生成）
+LINES = os.path.join(HERE, 'lines.json')   # 台词，可以随便改
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -170,9 +174,9 @@ def save_settings(s):
         pass
 
 
-def read_latest():
-    """读所有会话里最新的状态；顺手清掉两天前的旧文件。"""
-    best, now = None, time.time()
+def read_sessions():
+    """读所有会话的状态；顺手清掉两天前的旧文件。"""
+    out, now = [], time.time()
     for p in glob.glob(os.path.join(SESSIONS, '*.json')):
         try:
             mtime = os.path.getmtime(p)
@@ -181,11 +185,11 @@ def read_latest():
                 continue
             with open(p, encoding='utf-8') as f:
                 data = json.load(f)
-            if best is None or mtime > best[0]:
-                best = (mtime, data)
+            out.append(Session(mtime=mtime, state=str(data.get('state', 'waiting')), text=str(data.get('text', '')),
+                               project=str(data.get('project', ''))))
         except Exception:
             continue
-    return best
+    return out
 
 
 def load_patches():
@@ -259,6 +263,13 @@ class Pet:
         self.posture = Posture()       # 坐着还是站着（播坐下/站起的过渡用）
         self.swing = Swing()           # 被拎着时身体往哪边甩
         self.blink = start_blink(time.time(), random)
+        self.sub = None                # 多会话时气泡里的第二行小字
+        self.touch = Touch()           # 摸头、戳的识别状态
+        self.lines, err = load_lines(LINES)
+        if err:
+            self.log_once(err)
+        self.chatter = start_chatter(time.time(), random)
+        self.sprite_box = (0, 0, 0)    # 上一帧立绘在窗口里的 (左, 上, 高)，判断鼠标是不是在头上
 
         self.build()
         self.place_window()
@@ -270,6 +281,7 @@ class Pet:
         self.canvas.bind('<B1-Motion>', self.on_drag)
         self.canvas.bind('<ButtonRelease-1>', self.on_release)
         self.canvas.bind('<Double-Button-1>', self.on_double)
+        self.canvas.bind('<Motion>', self.on_motion)
         self.canvas.bind('<Button-3>', lambda e: self.menu.tk_popup(e.x_root, e.y_root))
 
         self.poll()
@@ -278,6 +290,7 @@ class Pet:
         self.watch_focus()
         self.watch_claude()
         self.watch_break()
+        self.watch_chat()
 
     # ---------- 布局 ----------
     def build(self):
@@ -314,16 +327,17 @@ class Pet:
             self.cache[key] = prepare(os.path.join(HERE, 'sprites', file + '.png'), self.k, flip, patch)
         return self.cache[key]
 
-    def bubble_for(self, text):
-        """这句话的气泡图；同一句话只画一次。"""
-        if text not in self.bubble_cache:
+    def bubble_for(self, text, sub=None):
+        """这句话（和第二行小字）的气泡图；同样的内容只画一次。"""
+        key = (text, sub)
+        if key not in self.bubble_cache:
             if len(self.bubble_cache) >= BUBBLE_CACHE:
                 self.bubble_cache = {}
             # 10 是气泡左右内边距（见 render.bubble_image），扣掉它，气泡外宽才不会超过 BUBBLE_MAX_W
             max_w = round(BUBBLE_MAX_W * self.scale) - 2 * self.style.px(10)
-            lay = layout(text, self.style.measure, max_w)
-            self.bubble_cache[text] = bubble_image(lay, self.style)
-        return self.bubble_cache[text]
+            lay = layout(text, self.style.measure, max_w, sub)
+            self.bubble_cache[key] = bubble_image(lay, self.style)
+        return self.bubble_cache[key]
 
     def fit_width(self, width):
         """气泡变宽变窄时窗口跟着变，脚底的中心点不动。"""
@@ -335,6 +349,13 @@ class Pet:
         self.root.geometry(f'{width}x{self.H}+{x}+{self.root.winfo_y()}')
         self.win_pos = None
 
+    def log_once(self, message):
+        """记一条不是异常的错误（比如台词文件坏了）。"""
+        try:
+            raise RuntimeError(message)
+        except RuntimeError:
+            log_error()
+
     def display_text(self):
         if self.speech and time.time() < self.speech[1]:
             return self.speech[0]
@@ -343,6 +364,12 @@ class Pet:
         if self.claude_state() == 'idle':
             return '在发呆～ zZ'
         return self.text
+
+    def bubble_sub(self):
+        """第二行小字：只在显示 Claude 的状态时出现（临时说话、提醒休息时不出现）。"""
+        if self.speech_state() is not None or (self.speech and time.time() < self.speech[1]) or self.break_state.level:
+            return None
+        return self.sub
 
     def claude_state(self):
         if self.state == 'waiting' and time.time() - self.state_since > IDLE_AFTER:
@@ -410,6 +437,8 @@ class Pet:
         self.menu.add_checkbutton(label='切到 Claude 时自动隐藏', variable=self.hide_var, command=self.toggle_hide)
         self.sound_var = tk.BooleanVar(value=self.settings.get('sound', True))
         self.menu.add_checkbutton(label='提示音', variable=self.sound_var, command=self.toggle_sound)
+        self.chat_var = tk.BooleanVar(value=self.settings.get('chat', True) is not False)
+        self.menu.add_checkbutton(label='闲聊', variable=self.chat_var, command=self.toggle_chat)
         self.menu.add_separator()
         self.break_var = tk.BooleanVar(value=self.break_cfg.enabled)
         self.menu.add_checkbutton(label='休息提醒', variable=self.break_var, command=self.toggle_break)
@@ -484,6 +513,10 @@ class Pet:
         self.settings['sound'] = self.sound_var.get()
         save_settings(self.settings)
 
+    def toggle_chat(self):
+        self.settings['chat'] = self.chat_var.get()
+        save_settings(self.settings)
+
     def toggle_break(self):
         self.settings['breakEnabled'] = self.break_var.get()
         save_settings(self.settings)
@@ -514,6 +547,34 @@ class Pet:
             self.motion = walk_to(self.motion, 0.5, time.time())  # 走到窗口中间，来找你
         self.refresh()
         self.play('error' if ev.level >= 3 else 'done')
+
+    def wake(self):
+        """她睡着了（等你太久）的话把她叫醒：当作你刚回来，重新开始计时。"""
+        if self.claude_state() == 'idle':
+            self.state_since = time.time()
+
+    def react(self, kind):
+        """摸头、戳、连戳生气、哼：说一句，换上对应的立绘（'huff' 不换）。"""
+        self.wake()
+        line = pick(self.lines.get(kind) or [''], '', random)
+        self.say(line, REACT_S[kind], None if kind == 'huff' else kind)
+
+    def watch_chat(self):
+        try:
+            now = time.time()
+            local = time.localtime(now)
+            quiet = (not self.chat_var.get() or self.hidden or self.claude_state() != 'waiting'
+                     or self.break_state.level or self.speech_state() is not None
+                     or (self.speech and now < self.speech[1]))
+            ctx = Context(now=now, date=time.strftime('%Y-%m-%d', local), hour=local.tm_hour, quiet=bool(quiet),
+                          project=self.project)
+            self.chatter, line = next_line(self.chatter, ctx, self.lines, random)
+            if line:
+                self.say(line, CHAT_SHOW_S)
+        except Exception:
+            log_error()
+        finally:
+            self.root.after(5000, self.watch_chat)
 
     def acknowledge_break(self):
         self.break_state = acknowledge(self.break_state, time.time())
@@ -551,6 +612,8 @@ class Pet:
             self.moved = True
         x, y = e.x_root - self.drag[0], e.y_root - self.drag[1]
         self.root.geometry(f'+{x}+{y}')
+        if self.moved:
+            self.wake()  # 拎起来就醒了
         if self.moved and self.roam and self.motion:
             feet = (x + self.W / 2, y + self.line_y)
             self.motion = hold(self.motion, *feet)  # 她被你拎起来了：位置完全跟着光标走
@@ -577,37 +640,57 @@ class Pet:
         else:
             self.settings['x'], self.settings['y'] = self.root.winfo_x(), self.root.winfo_y()
             save_settings(self.settings)
-        if not self.moved and self.break_state.level:
-            self.acknowledge_break()  # 提醒的时候点她一下，就是"我去休息了"
+        if not self.moved:
+            if self.break_state.level:
+                self.acknowledge_break()  # 提醒的时候点她一下，就是"我去休息了"
+            else:
+                self.touch = on_click(self.touch, time.time())  # 等一下，确认不是双击再算戳
 
     def on_double(self, e):
         # 双击：把 Claude 窗口叫到前台
+        self.touch = touch_double(self.touch)
         hwnd = find_claude_window()
         if hwnd:
             if user32.IsIconic(hwnd):
                 user32.ShowWindow(hwnd, 9)  # SW_RESTORE
             user32.SetForegroundWindow(hwnd)
 
+    def on_motion(self, e):
+        """鼠标在她身上（没按键）移动：在头上来回划就是摸头。"""
+        if self.drag is not None:
+            return
+        left, top, h = self.sprite_box
+        in_head = h > 0 and top <= e.y <= top + HEAD_SHARE * h
+        self.touch, r = on_move(self.touch, time.time(), e.x, in_head)
+        if r:
+            self.react(r)
+
     # ---------- 循环 ----------
     def poll(self):
-        latest = read_latest()
-        if latest and latest[0] != self.last_mtime:
-            self.last_mtime_seen, self.last_mtime = self.last_mtime, latest[0]
-            data = latest[1]
-            state = data.get('state', 'waiting')
-            if state not in FIXED_SPRITES:
-                state = 'waiting'
+        summary = summarize(read_sessions(), time.time())
+        self.sub = summary.sub
+        latest = summary.latest
+        if latest and latest.mtime != self.last_mtime:
+            self.last_mtime_seen, self.last_mtime = self.last_mtime, latest.mtime
+            state = latest.state if latest.state in FIXED_SPRITES else 'waiting'
             changed = state != self.state
-            self.state, self.text = state, data.get('text', '')
-            self.project = data.get('project', '')
+            self.state, self.text, self.project = state, latest.text, latest.project
             self.state_since = time.time()
-            sound = data.get('sound')
-            if sound in ('done', 'error') and self.last_mtime_seen:  # 刚启动时不重播旧提示音
-                self.play(sound)
+            self.on_state_file(latest)
             if changed:
                 self.hop_at = time.time()
             self.refresh()
         self.root.after(250, self.poll)
+
+    def on_state_file(self, latest):
+        """会话文件里带的提示音（刚启动时不重播旧的）。"""
+        try:
+            with open(max(glob.glob(os.path.join(SESSIONS, '*.json')), key=os.path.getmtime), encoding='utf-8') as f:
+                sound = json.load(f).get('sound')
+        except Exception:
+            return
+        if sound in ('done', 'error') and self.last_mtime_seen:
+            self.play(sound)
 
     def watch_surface(self):
         """每 0.25 秒：刷新所有地板，并找出"当前窗口"——前台窗口稳定 SETTLE_S 秒才算，Alt+Tab 路过的不算。"""
@@ -691,6 +774,9 @@ class Pet:
             self.update_motion(t, dt)
         if self.hidden:
             return  # 藏起来的时候不用合成画面
+        self.touch, r = on_tick(self.touch, t)
+        if r:
+            self.react(r)
         self.blink = step_blink(self.blink, t, random)
         held = self.roam and self.motion is not None and self.motion.mode == 'held'
         self.swing = swing_step(self.swing, self.throw_velocity()[0], t, SWING_V * self.scale) if held else Swing()
@@ -699,11 +785,12 @@ class Pet:
         hop = -14 * math.sin(since / 0.28 * math.pi) if since < 0.28 else 0  # 换状态时小跳一下
         sprite_bottom = (self.line_y + round((1 - pose.anchor) * img.height)
                          + round((self.bob_for(pose.file, t) + hop) * self.scale))
+        self.sprite_box = (0, sprite_bottom - img.height, img.height)
         text = self.display_text()
         if (self.claude_state() == 'thinking' and self.text.endswith('中')
                 and not self.break_state.level and not self.speech_state()):
             text = self.text + '.' * (int(t * 2.5) % 3 + 1)  # “思考中” 后面的点点点一跳一跳
-        image = compose(img, sprite_bottom, self.bubble_for(text), self.bubble_h + self.bubble_dy,
+        image = compose(img, sprite_bottom, self.bubble_for(text, self.bubble_sub()), self.bubble_h + self.bubble_dy,
                         self.min_w, self.H)
         if pose.file.startswith('sleep'):  # z Z 从头顶右上方冒出来（离开头发，免得压在黑色蝴蝶结上看不见）
             top = sprite_bottom - img.height
