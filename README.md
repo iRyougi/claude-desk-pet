@@ -21,6 +21,10 @@
 
 还有一个彩蛋：连续出错 3 次会……石化 🗿
 
+- **单击**她：戳一下，她会有反应；连着戳会生气哦
+- 鼠标在她**头上来回划**：摸头，她会害羞
+- 她偶尔会主动说话：早上问好、饭点提醒吃饭、平时随口聊两句（右键菜单可以关掉「闲聊」）
+- 同时开着好几个会话时，气泡下面会多一行小字，告诉你别的会话在等你或者出错了
 - **双击**桌宠：把 Claude 窗口叫到前台
 - **右键**菜单：调大小（小/中/大）、切到 Claude 时自动隐藏、提示音开关、退出
 
@@ -99,7 +103,7 @@ claude plugin install desk-pet --marketplace BingXing-ai/claude-desk-pet
 - **换立绘**：把 `pet/sprites/` 里的 PNG 换成你自己的图（透明背景，文件名保持不变）。半透明的边缘、发丝、阴影都会照原样显示，不需要另外描边
 - **换眨眼**：用 `python tools/blink_patch.py export sit-swing-1` 导出绿底原图，让 AI 只把眼睛改成闭眼，再用 `python tools/blink_patch.py build sit-swing-1 <改好的图>` 生成补丁
 - **换提示音**：替换 `sounds/done.wav`（完成）和 `sounds/error.wav`（出错）
-- **改台词**：气泡里的文字写在 `hooks/register.ts` 里
+- **改台词**：Claude 状态的气泡文字写在 `hooks/register.ts` 里；闲聊、摸头、戳她的台词写在 `pet/lines.json` 里
 
 桌宠的位置、大小和开关保存在 `~/.claude/desk-pet/settings.json`。
 
