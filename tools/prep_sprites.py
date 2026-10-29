@@ -4,7 +4,7 @@
 
 默认会把新立绘的发色和白色调到和原来的立绘一致；加 --raw 则保持 AI 出图的原色。
 
-源文件按文件名里的关键字匹配（见 SHEETS）。SCALE 是"源图一个像素 → 成品多少像素"，
+源文件按文件名里的关键字匹配（见 SHEETS）。只处理文件夹里找得到源图的立绘；没有源图的保持原样。SCALE 是"源图一个像素 → 成品多少像素"，
 按头的大小对齐，让各个姿势在桌面上看起来一样大。
 """
 from __future__ import annotations
@@ -46,14 +46,28 @@ SHEETS = (
     Sheet('叉腰', ('remind-3',), 0.294),
     Sheet('跃起', ('jump',), 0.294),
     Sheet('落地', ('land',), 0.294),
+    # 下面这批是 B 动画、C 互动的新素材（GPT 出图，art/gpt-output/）。两帧一组的画在一张横图里，人物比单张图小，
+    # 所以系数大一些；系数是按轮廓和原立绘的重合度量出来的（瞌睡对 sit-swing-1、被戳对 smile）
+    Sheet('下蹲两帧', ('sit-down-1', 'sit-down-2'), 0.48),
+    Sheet('被拎两帧', ('held', 'held-swing'), 0.455),
+    Sheet('下落', ('fall',), 0.31),
+    Sheet('瞌睡两帧', ('sleep-1', 'sleep-2'), 0.485),
+    Sheet('害羞', ('shy',), 0.30),
+    Sheet('被戳', ('poked',), 0.30),
 )
 
 
-def find_source(folder: str, keyword: str) -> str:
-    hits = [f for f in os.listdir(folder) if keyword in f and f.lower().endswith('.png')]
-    if len(hits) != 1:
-        raise SystemExit(f'「{keyword}」应该恰好匹配 1 个文件，实际 {len(hits)} 个：{hits}')
-    return os.path.join(folder, hits[0])
+def available(folder: str, sheets=SHEETS) -> list:
+    """文件夹里找得到源图的立绘表，和各自的源图路径。没有源图的表跳过；一个关键字匹配到多个文件就报错。"""
+    files = sorted(f for f in os.listdir(folder) if f.lower().endswith('.png'))
+    found = []
+    for sheet in sheets:
+        hits = [f for f in files if sheet.keyword in f]
+        if len(hits) > 1:
+            raise SystemExit(f'「{sheet.keyword}」应该最多匹配 1 个文件，实际 {len(hits)} 个：{hits}')
+        if hits:
+            found.append((sheet, os.path.join(folder, hits[0])))
+    return found
 
 
 def column_coverage(rgba: Image.Image) -> list:
@@ -148,7 +162,14 @@ def main(argv: list) -> int:
         print(__doc__)
         return 2
     os.makedirs(OUT_DIR, exist_ok=True)
-    keyed = [(s, key_green(Image.open(find_source(args[0], s.keyword)))) for s in SHEETS]
+    found = available(args[0])
+    if not found:
+        print(f'{args[0]} 里没有找到任何源图（文件名里要带关键字）')
+        return 1
+    skipped = [s.keyword for s in SHEETS if s not in {f for f, _ in found}]
+    if skipped:
+        print('没有源图、跳过：' + '、'.join(skipped))
+    keyed = [(s, key_green(Image.open(path))) for s, path in found]
     if not raw:
         src, ref = measure(k for _, k in keyed), reference_tone()
         print('新立绘', describe(src))
