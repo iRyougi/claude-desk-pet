@@ -31,6 +31,8 @@ SOUNDS = os.path.join(os.path.dirname(HERE), 'sounds')
 RUN_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.expanduser('~'), '.claude', 'desk-pet')
 SESSIONS = os.path.join(RUN_DIR, 'sessions')
 SETTINGS = os.path.join(RUN_DIR, 'settings.json')
+COMMAND = os.path.join(RUN_DIR, 'command.json')   # 插件收到 /pet 子命令后写在这里
+COMMAND_TTL_MS = 30_000                           # 比这更早的命令不执行（桌宠重启后不重放旧命令）
 
 # 只允许开一个桌宠：占住一个本地端口，占不到说明已经有一个在跑
 try:
@@ -52,6 +54,9 @@ from effects import zz_marks  # noqa: E402
 from chatter import CHAT_SHOW_S, Context, load_lines, next_line, pick, start as start_chatter  # noqa: E402
 from interact import HEAD_SHARE, REACT_S, Touch, on_click, on_double as touch_double, on_move, on_tick  # noqa: E402
 from sessions import Session, summarize  # noqa: E402
+from commands import Command, parse as parse_command  # noqa: E402
+from files import write_json_atomic  # noqa: E402
+from screen import choose_z, is_fullscreen  # noqa: E402
 
 # 用到的全部立绘（pet/sprites/<名字>.png）
 SPRITE_FILES = sorted(set(FIXED_SPRITES.values()) | {
@@ -167,11 +172,9 @@ def load_settings():
 
 def save_settings(s):
     try:
-        os.makedirs(RUN_DIR, exist_ok=True)
-        with open(SETTINGS, 'w', encoding='utf-8') as f:
-            json.dump(s, f, ensure_ascii=False)
+        write_json_atomic(SETTINGS, s)
     except Exception:
-        pass
+        log_error()
 
 
 def read_sessions():
@@ -270,6 +273,11 @@ class Pet:
             self.log_once(err)
         self.chatter = start_chatter(time.time(), random)
         self.sprite_box = (0, 0, 0)    # 上一帧立绘在窗口里的 (左, 上, 高)，判断鼠标是不是在头上
+        self.forced_hidden = False     # /pet hide 藏起来了
+        self.fullscreen = False        # 她所在的那块屏正在全屏
+        self.pending_break = None      # 全屏期间到点的休息提醒，等退出全屏再出
+        self.z = None                  # 上一次设置的层级（'top' 或窗口句柄）
+        self.last_command = None       # 处理过的最后一条 /pet 命令的 id
 
         self.build()
         self.place_window()
@@ -590,7 +598,9 @@ class Pet:
             if self.break_cfg.enabled:  # 关掉的时候不检查；"试一下提醒"的预览会留到你点她为止
                 had = self.break_state.level
                 self.break_state, ev = step(self.break_state, time.time(), idle_seconds(), self.break_cfg)
-                if ev:
+                if ev and self.fullscreen:
+                    self.pending_break = ev   # 全屏的时候不打扰，退出全屏再提醒
+                elif ev:
                     self.on_break_event(ev)
                 elif had and not self.break_state.level:
                     self.refresh()  # 你走开休息了，她就不催了
@@ -680,7 +690,73 @@ class Pet:
             if changed:
                 self.hop_at = time.time()
             self.refresh()
+        self.check_command()
         self.root.after(250, self.poll)
+
+    def check_command(self):
+        """读插件写来的 /pet 命令；同一条只执行一次，太旧的不执行。读到写了一半的文件就等下次。"""
+        try:
+            with open(COMMAND, encoding='utf-8') as f:
+                data = json.load(f)
+            cid = str(data.get('id', ''))
+            ts = float(data.get('ts', 0))
+            args = str(data.get('args', ''))
+        except (FileNotFoundError, ValueError, TypeError, AttributeError):
+            return
+        if not cid or cid == self.last_command:
+            return
+        self.last_command = cid
+        if time.time() * 1000 - ts > COMMAND_TTL_MS:
+            return
+        try:
+            self.run_command(args)
+        except Exception:
+            log_error()
+
+    def run_command(self, args):
+        cmd = parse_command(args)
+        if isinstance(cmd, str):
+            self.forced_hidden = False
+            self.say(cmd, 5.0)
+            return
+        name, value = cmd.name, cmd.value
+        if name != 'hide':
+            self.forced_hidden = False
+        if name == 'show':
+            self.say('我在这儿～', 3.0)
+        elif name == 'hide':
+            self.forced_hidden = True
+        elif name == 'home':
+            self.set_following(True)
+            self.say('我回来啦～', 3.0)
+        elif name == 'quit':
+            self.root.destroy()
+        elif name == 'rest':
+            self.acknowledge_break()
+        elif name == 'size':
+            self.size_var.set(value)
+            self.resize()
+            self.say(f'变成{value}号啦', 3.0)
+        elif name in ('follow', 'roam', 'sound', 'chat'):
+            var, toggle, label = {
+                'follow': (self.follow_var, self.toggle_follow, '自动跟着当前窗口'),
+                'roam': (self.roam_var, self.toggle_roam, '跟着窗口走动'),
+                'sound': (self.sound_var, self.toggle_sound, '提示音'),
+                'chat': (self.chat_var, self.toggle_chat, '闲聊'),
+            }[name]
+            var.set(value)
+            toggle()
+            self.say(f'{label}已{"打开" if value else "关闭"}', 3.0)
+        elif name == 'break':
+            self.break_var.set(value)
+            self.toggle_break()
+            self.say(f'休息提醒已{"打开" if value else "关闭"}', 3.0)
+        elif name == 'break-minutes':
+            self.work_var.set(str(value))
+            self.set_work_minutes()
+            self.say(f'以后每 {value} 分钟提醒你休息', 3.0)
+        elif name == 'break-test':
+            self.preview_break(1)
 
     def on_state_file(self, latest):
         """会话文件里带的提示音（刚启动时不重播旧的）。"""
@@ -711,10 +787,29 @@ class Pet:
             if self.target_hwnd and winapi.window_info(self.target_hwnd) is None:
                 self.target_hwnd = win.hwnd if win else None  # 当前窗口关了/最小化了
             self.check_dpi()
+            self.apply_z()
         except Exception:
             log_error()
         finally:
             self.root.after(250, self.watch_surface)
+
+    def apply_z(self):
+        """坐在窗口上时贴着那个窗口（会被一起盖住），其余时候置顶。失败就退回置顶，只记一次日志。"""
+        if self.hidden:
+            return
+        speaking = bool(self.speech and time.time() < self.speech[1])
+        want = choose_z(self.motion if self.roam else None, self.break_state.level, speaking)
+        if want == 'top':
+            if self.z != 'top':
+                winapi.set_topmost(self.layer.hwnd)
+                self.z = 'top'
+            return
+        if not winapi.place_above(self.layer.hwnd, want):
+            self.log_once(f'SetWindowPos 失败，退回置顶（窗口 {want}）')
+            winapi.set_topmost(self.layer.hwnd)
+            self.z = 'top'
+            return
+        self.z = want
 
     def follow_surface(self):
         """"跟着当前窗口"时她该去的地方：当前窗口的顶边；上方放不下就是屏幕底边（限在这个窗口的左右范围内）。"""
@@ -810,18 +905,40 @@ class Pet:
         finally:
             self.root.after(33, self.animate)
 
+    def feet_point(self):
+        if self.roam and self.motion:
+            return round(self.motion.x), round(self.motion.y - 1)
+        return self.root.winfo_x() + self.W // 2, self.root.winfo_y() + self.line_y - 1
+
+    def check_fullscreen(self):
+        fg = winapi.foreground_frame(os.getpid())
+        if fg is None:
+            return False
+        _, rect, cls = fg
+        return is_fullscreen(rect, cls, winapi.monitor_rect_at(*self.feet_point()))
+
     def watch_focus(self):
-        should_hide = (self.hide_var.get() and claude_is_foreground() and self.drag is None
-                       and not self.break_state.level)  # 正在提醒休息的时候不躲
-        if should_hide and not self.hidden:
-            self.root.withdraw()
-            self.hidden = True
-        elif not should_hide and self.hidden:
-            self.root.deiconify()
-            self.root.attributes('-topmost', True)
-            self.hidden = False
-            self.win_pos = None
-        self.root.after(300, self.watch_focus)
+        try:
+            self.fullscreen = self.check_fullscreen()
+            auto_hide = (self.hide_var.get() and claude_is_foreground() and self.drag is None
+                         and not self.break_state.level)  # 正在提醒休息的时候不躲
+            should_hide = self.forced_hidden or self.fullscreen or auto_hide
+            if should_hide and not self.hidden:
+                self.root.withdraw()
+                self.hidden = True
+            elif not should_hide and self.hidden:
+                self.root.deiconify()
+                self.root.attributes('-topmost', True)
+                self.hidden = False
+                self.win_pos = None
+                self.z = None   # 重新显示后层级要重新设
+            if not self.fullscreen and self.pending_break is not None:
+                ev, self.pending_break = self.pending_break, None
+                self.on_break_event(ev)
+        except Exception:
+            log_error()
+        finally:
+            self.root.after(300, self.watch_focus)
 
     def watch_claude(self):
         # Claude 关掉两分钟后，桌宠也自己退出

@@ -14,6 +14,13 @@ DWMWA_CLOAKED = 14                # 被系统"隐藏"的窗口（比如别的虚
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW = 0x80
 MONITOR_DEFAULTTONEAREST = 2
+GW_HWNDNEXT = 2
+GW_HWNDPREV = 3
+WS_EX_TOPMOST = 0x8
+HWND_TOP = 0
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x1, 0x2, 0x10
 SPI_GETWORKAREA = 0x30
 MIN_SIZE = (160, 80)
 
@@ -41,6 +48,12 @@ user32.MonitorFromWindow.restype = wt.HANDLE
 user32.GetMonitorInfoW.argtypes = [wt.HANDLE, ctypes.POINTER(MONITORINFO)]
 user32.GetWindowLongW.argtypes = [wt.HWND, ctypes.c_int]
 dwmapi.DwmGetWindowAttribute.argtypes = [wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD]
+user32.GetWindow.argtypes = [wt.HWND, wt.UINT]
+user32.GetWindow.restype = wt.HWND
+user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.UINT]
+user32.SetWindowPos.restype = wt.BOOL
+user32.MonitorFromPoint.argtypes = [wt.POINT, wt.DWORD]
+user32.MonitorFromPoint.restype = wt.HANDLE
 
 
 def _rect(r: wt.RECT) -> Rect:
@@ -142,3 +155,43 @@ def foreground_window(own_pid: int) -> WinInfo | None:
     if not hwnd or _pid(hwnd) == own_pid:
         return None
     return window_info(hwnd)
+
+
+def foreground_frame(own_pid: int):
+    """前台窗口的 (句柄, 外框, 类名)；没有前台窗口或是她自己时返回 None。不做"能不能坐"的过滤（全屏判断用）。"""
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd or _pid(hwnd) == own_pid:
+        return None
+    rect = _frame(hwnd)
+    if rect is None:
+        return None
+    return int(hwnd), rect, _class_name(hwnd)
+
+
+def monitor_rect_at(x: int, y: int) -> Rect:
+    """屏幕上 (x, y) 所在（或最近的）显示器的整个矩形，含任务栏。"""
+    mon = user32.MonitorFromPoint(wt.POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST)
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    if mon and user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+        return _rect(info.rcMonitor)
+    return primary_work_area()
+
+
+_FLAGS = SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+
+
+def set_topmost(hwnd: int) -> bool:
+    return bool(user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, _FLAGS))
+
+
+def place_above(hwnd: int, target: int) -> bool:
+    """把 hwnd 放到 target 正上方一层（不置顶）。已经在那儿就什么都不做。"""
+    if user32.GetWindow(hwnd, GW_HWNDNEXT) == target and not user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST:
+        return True
+    if not user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, _FLAGS):
+        return False
+    above = user32.GetWindow(target, GW_HWNDPREV)
+    if not above or above == hwnd or user32.GetWindowLongW(above, GWL_EXSTYLE) & WS_EX_TOPMOST:
+        above = HWND_TOP   # target 上面是置顶窗口（或没有窗口）：放到普通窗口的最上面
+    return bool(user32.SetWindowPos(hwnd, above, 0, 0, 0, 0, _FLAGS))
