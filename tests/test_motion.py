@@ -28,11 +28,28 @@ class ChooseSurfaceTest(unittest.TestCase):
 
     def test_maximized_window_falls_back_to_the_taskbar(self):
         s = choose_surface(self.win(Rect(0, 0, 1920, 1040), maximized=True), WORK, need_above=250)
-        self.assertEqual((s.kind, s.y, s.left, s.right), ('ground', 1040, 0, 1920))
+        self.assertEqual((s.kind, s.y), ('ground', 1040))
 
     def test_window_too_close_to_the_screen_top_falls_back(self):
         s = choose_surface(self.win(Rect(200, 100, 1000, 800)), WORK, need_above=250)
         self.assertEqual(s.kind, 'ground')
+
+    def test_without_headroom_she_stays_within_that_windows_width(self):
+        s = choose_surface(self.win(Rect(200, 100, 1000, 800)), WORK, need_above=250, margin=24)
+        self.assertEqual((s.kind, s.y, s.left, s.right), ('ground', 1040, 224, 976))
+
+    def test_maximized_window_keeps_her_inside_its_width_too(self):
+        s = choose_surface(self.win(Rect(0, 0, 1920, 1040), maximized=True), WORK, need_above=250, margin=24)
+        self.assertEqual((s.left, s.right), (24, 1896))
+
+    def test_ground_of_different_windows_is_a_different_surface(self):
+        a = choose_surface(WinInfo(1, Rect(200, 100, 1000, 800), WORK), WORK, need_above=250)
+        b = choose_surface(WinInfo(2, Rect(200, 100, 1000, 800), WORK), WORK, need_above=250)
+        self.assertNotEqual(a.key, b.key)  # 切到另一个窗口，她要跳过去
+
+    def test_narrow_window_falls_back_to_the_whole_screen_width(self):
+        s = choose_surface(self.win(Rect(200, 400, 400, 800)), WORK, need_above=250, min_width=240)
+        self.assertEqual((s.kind, s.left, s.right), ('ground', 0, 1920))
 
     def test_narrow_window_falls_back(self):
         s = choose_surface(self.win(Rect(200, 400, 400, 800)), WORK, need_above=250, min_width=240)

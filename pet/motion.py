@@ -95,19 +95,26 @@ class Pose:
     anchor: float  # 立绘里"接触平面"的那条线（占高度的比例）
 
 
-def _ground(work: Rect) -> Surface:
-    return Surface(key=('ground', work.left, work.top), left=float(work.left), right=float(work.right),
-                   y=float(work.bottom), kind='ground')
+def _ground(work: Rect, within: Rect | None = None, owner: object = None, margin: int = 24) -> Surface:
+    """屏幕底边（任务栏上沿）。给了 within，她就只待在那个窗口的左右范围内，不满屏幕乱站。"""
+    left, right = float(work.left), float(work.right)
+    if within is not None:
+        left, right = max(left, within.left + margin), min(right, within.right - margin)
+    return Surface(key=('ground', work.left, work.top, owner), left=left, right=right, y=float(work.bottom),
+                   kind='ground')
 
 
 def choose_surface(win: WinInfo | None, fallback_work: Rect, *, need_above: int, margin: int = 24,
                    min_width: int = 240) -> Surface:
-    """前台窗口顶边上方放得下她就坐上去，否则（最大化、贴着屏幕顶、太窄、没有窗口）站在任务栏上。"""
+    """前台窗口顶边上方放得下她就坐上去；放不下（最大化、贴着屏幕顶），就站在屏幕底边、待在这个窗口的
+    左右范围内；窗口太窄或者没有窗口，站在整条屏幕底边。"""
     if win is None:
         return _ground(fallback_work)
     r = win.rect
-    if win.maximized or r.top - need_above < win.work.top or r.width < min_width:
+    if r.width < min_width:
         return _ground(win.work)
+    if win.maximized or r.top - need_above < win.work.top:
+        return _ground(win.work, within=r, owner=win.hwnd, margin=margin)
     return Surface(key=win.hwnd, left=float(r.left + margin), right=float(r.right - margin), y=float(r.top),
                    kind='window')
 
