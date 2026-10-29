@@ -93,7 +93,7 @@ claude plugin install desk-pet --marketplace BingXing-ai/claude-desk-pet
 
 ## 自定义
 
-- **换立绘**：把 `pet/sprites/` 里的 PNG 换成你自己的图（透明背景，文件名保持不变）
+- **换立绘**：把 `pet/sprites/` 里的 PNG 换成你自己的图（透明背景，文件名保持不变）。半透明的边缘、发丝、阴影都会照原样显示，不需要另外描边
 - **换提示音**：替换 `sounds/done.wav`（完成）和 `sounds/error.wav`（出错）
 - **改台词**：气泡里的文字写在 `hooks/register.ts` 里
 
