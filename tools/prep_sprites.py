@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -72,19 +73,36 @@ def resize_premultiplied(im: Image.Image, scale: float) -> Image.Image:
     return im.convert('RGBa').resize(size, Image.LANCZOS).convert('RGBA')
 
 
+def head_x(im: Image.Image) -> float:
+    """头的水平位置：角色最上面四分之一那部分的中心。头发摆动会改变整个身体的外框，但头基本不动。"""
+    left, top, right, bottom = solid_bbox(im)
+    limit = top + max(1, (bottom - top) // 4)
+    data = pixels(im.getchannel('A'))
+    xs = [x for y in range(top, limit) for x in range(im.width) if data[y * im.width + x] > ALPHA_SOLID]
+    return sum(xs) / len(xs)
+
+
+def align_on_head(frames: list) -> list:
+    """把几帧放进同样大小的画布，并让每一帧的头落在同一个水平位置（走路时头才不会左右抖）。"""
+    boxes = [solid_bbox(f) for f in frames]
+    anchors = [head_x(f) for f in frames]
+    left = math.ceil(max(a - b[0] for a, b in zip(anchors, boxes)))
+    right = math.ceil(max(b[2] - a for a, b in zip(anchors, boxes)))
+    out = []
+    for f, b, a in zip(frames, boxes, anchors):
+        canvas = Image.new('RGBA', (left + right, f.height))
+        offset = math.floor(left - (a - b[0]) + 0.5)  # 不用 round：它对 .5 取偶数，会让两帧差 1 像素
+        canvas.paste(f.crop((b[0], 0, b[2], f.height)), (offset, 0))
+        out.append(canvas)
+    return out
+
+
 def cut_frames(rgba: Image.Image, count: int) -> list:
-    """切成 count 帧：每帧按自己的左右范围裁，上下用所有帧的并集（保持脚底对齐），再居中放进同宽画布。"""
+    """切成 count 帧：上下用所有帧的并集（保持脚底对齐），左右让每一帧的头对齐。"""
     cells = [rgba.crop((x0, 0, x1, rgba.height)) for x0, x1 in split_valleys(column_coverage(rgba), count)]
     boxes = [solid_bbox(c) for c in cells]
     top, bottom = min(b[1] for b in boxes), max(b[3] for b in boxes)
-    tight = [c.crop((b[0], top, b[2], bottom)) for c, b in zip(cells, boxes)]
-    width = max(t.width for t in tight)
-    frames = []
-    for t in tight:
-        canvas = Image.new('RGBA', (width, t.height))
-        canvas.paste(t, ((width - t.width) // 2, 0))
-        frames.append(canvas)
-    return frames
+    return align_on_head([c.crop((0, top, c.width, bottom)) for c in cells])
 
 
 def pad(im: Image.Image) -> Image.Image:
