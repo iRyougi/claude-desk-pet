@@ -301,7 +301,7 @@ class Pet:
         """气泡变宽变窄时窗口跟着变，脚底的中心点不动。"""
         if width == self.W:
             return
-        x = self.root.winfo_x() + (self.W - width) // 2
+        x = self.root.winfo_x() + self.W // 2 - width // 2  # 和 rebuild() 一样按中心点算，来回变宽不会慢慢挪位置
         self.W = width
         self.canvas.config(width=width)
         self.root.geometry(f'{width}x{self.H}+{x}+{self.root.winfo_y()}')
@@ -658,6 +658,8 @@ class Pet:
             self.speech = None
         if self.roam:
             self.update_motion(t, dt)
+        if self.hidden:
+            return  # 藏起来的时候不用合成画面
         pose, img = self.apply_pose()
         since = t - self.hop_at
         hop = -14 * math.sin(since / 0.28 * math.pi) if since < 0.28 else 0  # 换状态时小跳一下
@@ -670,9 +672,9 @@ class Pet:
         image = compose(img, sprite_bottom, self.bubble_for(text), self.bubble_h + self.bubble_dy,
                         self.min_w, self.H)
         self.fit_width(image.width)
-        if self.roam and self.motion and self.drag is None and not self.hidden:
+        if self.roam and self.motion and self.drag is None:
             self.put_window(self.motion.x, self.motion.y)
-        if not self.hidden and not self.layer.show(image):
+        if not self.layer.show(image):
             raise OSError('UpdateLayeredWindow 失败')  # animate() 会记一次日志
 
     def animate(self):
@@ -708,7 +710,9 @@ class Pet:
 
 if __name__ == '__main__':
     try:
-        Pet().root.mainloop()
+        pet = Pet()
+        pet.root.mainloop()
+        pet.layer.close()
     except Exception:
         os.makedirs(RUN_DIR, exist_ok=True)
         with open(os.path.join(RUN_DIR, 'pet-error.log'), 'w', encoding='utf-8') as f:

@@ -16,8 +16,8 @@
 - alpha 为 0 的像素鼠标点穿（分层窗口的系统行为），不需要另做命中测试。
 - 删除 `KEY`、`EDGE` 和 `prepare()` 里的抠色逻辑；立绘缓存改为缩放后的 RGBA `Image`。
 - 新文件 `pet/render.py`：
-  - `compose(frame: FrameSpec) -> Image`：纯函数，输入立绘、偏移、叠加层、气泡内容，输出整帧图。
-  - `push(hwnd, image, x, y)`：唯一碰 Win32 的地方，负责 `CreateDIBSection` + `UpdateLayeredWindow`。
+  - `compose(sprite, sprite_bottom, bubble, bubble_bottom, min_w, height) -> Image`：纯函数，输入立绘、落点、气泡图，输出整帧图（叠加层留给 B 加）。
+  - 碰 Win32 的部分单独放在 `pet/layered.py` 的 `LayeredWindow.show(image)`：`CreateDIBSection` + `UpdateLayeredWindow`，不传位置。
 - 窗口位置和大小只由 `root.geometry()` 决定，`UpdateLayeredWindow` 不传位置、只换内容（只有一套坐标，`winfo_x()` 照常可用）。
 - 性能目标：30 帧/秒，窗口约 300×700 像素，CPU 占用不明显上升（实测记录在实现计划里）。
 

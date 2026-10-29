@@ -53,6 +53,7 @@ def _wrap(text: str, measure: Measure, max_w: float) -> list:
 
 
 def layout(text: str, measure: Measure, max_w: float, sub: str | None = None) -> BubbleLayout:
+    text = text.rstrip('\n')  # 句尾的换行不算一行，免得多出一个空行
     max_lines = 1 if sub else 2
     if measure(text.replace('\n', '')) > max_w * max_lines:
         text = PATH.sub(lambda m: shorten_path(m.group(0)), text)

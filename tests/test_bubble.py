@@ -67,6 +67,10 @@ class LayoutTest(unittest.TestCase):
     def test_empty_text(self):
         self.assertEqual(layout('', M, W).lines, ('',))
 
+    def test_trailing_newline_ignored(self):
+        self.assertEqual(layout('完成\n', M, W).lines, ('完成',))
+        self.assertEqual(layout('完成\n', M, W, sub='x').lines, ('完成',))
+
 
 if __name__ == '__main__':
     unittest.main()
