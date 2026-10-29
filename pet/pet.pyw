@@ -22,8 +22,8 @@ from PIL import Image, ImageOps
 
 from breaks import ACK_LINES, BreakConfig, BreakEvent, BreakState, acknowledge, is_night, pick_line, step
 from motion import (
-    FIXED_SPRITES, WALK_FRAMES, build_surfaces, choose_pose, choose_surface, hold, hop_to, release, spawn, tick,
-    walk_to,
+    FIXED_SPRITES, WALK_FRAMES, Posture, Swing, build_surfaces, choose_pose, choose_surface, hold, hop_to, release,
+    settle, spawn, swing_step, tick, walk_to,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,12 +46,15 @@ dpi.enable()
 import winapi  # noqa: E402  要等 DPI 感知设好以后再导入，窗口坐标才是真实像素
 from bubble import layout  # noqa: E402
 from layered import LayeredWindow  # noqa: E402
-from render import BubbleStyle, bubble_image, compose  # noqa: E402
+from render import BubbleStyle, bubble_image, compose, draw_marks  # noqa: E402
+from blink import closed as eyes_closed, start as start_blink, step as step_blink  # noqa: E402
+from effects import zz_marks  # noqa: E402
 
 # 用到的全部立绘（pet/sprites/<名字>.png）
 SPRITE_FILES = sorted(set(FIXED_SPRITES.values()) | {
     'remind-1', 'remind-2', 'remind-3', 'jump', 'land', 'sit-watch', 'sit-swing-1', 'sit-swing-2',
     'walk-1', 'walk-2', 'walk-3', 'walk-4', 'walk-5', 'walk-6',
+    'sit-down-1', 'sit-down-2', 'held', 'held-swing', 'fall', 'sleep-1', 'sleep-2',
 })
 SIZES = {'小': 140, '中': 190, '大': 250}  # 角色高度（100% 缩放下的像素）
 BASE_H = 400          # 立绘源图里一个站着的角色大约有多高；缩放按这个算，各姿势才能保持相对大小
@@ -62,6 +65,8 @@ STRIDES_PER_S = 1.2   # 每秒走几个整步；速度由它和步幅算出来�
 BUBBLE_MAX_W = 260    # 气泡最宽多少像素（100% 缩放）；放不下就换行，最多两行
 BUBBLE_AREA = 66      # 角色头顶留给气泡的高度（两行正文 + 尖角）
 BUBBLE_CACHE = 64     # 最多缓存多少张气泡图（文件名一直在变，不能无限存）
+SWING_V = 250         # 拖得比这快（像素/秒，100% 缩放），被拎着的她就往反方向歪
+PATCHES = os.path.join(HERE, 'sprites', 'patches.json')   # 眨眼补丁的位置（tools/blink_patch.py 生成）
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -183,9 +188,24 @@ def read_latest():
     return best
 
 
-def prepare(path, k, flip=False):
-    """按 k 倍缩放立绘（可水平翻转），保留透明度。按预乘透明度缩放，边缘才不会发黑。"""
+def load_patches():
+    """眨眼补丁：{立绘名: (x, y)}。文件坏了就当没有补丁（不眨眼），记一次日志。"""
+    try:
+        with open(PATCHES, encoding='utf-8') as f:
+            return {name: (int(v['x']), int(v['y'])) for name, v in json.load(f).items()}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        log_error()
+        return {}
+
+
+def prepare(path, k, flip=False, patch=None):
+    """按 k 倍缩放立绘（可水平翻转），保留透明度。patch=(补丁路径, x, y) 时先把补丁贴上去（眨眼）。
+    按预乘透明度缩放，边缘才不会发黑。"""
     im = Image.open(path).convert('RGBA')
+    if patch:
+        im.alpha_composite(Image.open(patch[0]).convert('RGBA'), patch[1:])
     if flip:
         im = ImageOps.mirror(im)
     size = (max(1, round(im.width * k)), max(1, round(im.height * k)))
@@ -235,6 +255,10 @@ class Pet:
         self.bubble_dy = 0
         self.pose_key = None
         self.anchor = 1.0
+        self.patches = load_patches()
+        self.posture = Posture()       # 坐着还是站着（播坐下/站起的过渡用）
+        self.swing = Swing()           # 被拎着时身体往哪边甩
+        self.blink = start_blink(time.time(), random)
 
         self.build()
         self.place_window()
@@ -280,10 +304,14 @@ class Pet:
         self.pose_key = None
         self.bubble_dy = 0
 
-    def sprite_image(self, file, flip):
-        key = (file, flip)
+    def sprite_image(self, file, flip, blink=False):
+        key = (file, flip, blink)
         if key not in self.cache:
-            self.cache[key] = prepare(os.path.join(HERE, 'sprites', file + '.png'), self.k, flip)
+            patch = None
+            if blink:
+                x, y = self.patches[file]
+                patch = (os.path.join(HERE, 'sprites', file + '.blink.png'), x, y)
+            self.cache[key] = prepare(os.path.join(HERE, 'sprites', file + '.png'), self.k, flip, patch)
         return self.cache[key]
 
     def bubble_for(self, text):
@@ -330,17 +358,18 @@ class Pet:
         now = time.time()
         return choose_pose(self.motion if self.roam else None, now, self.claude_state(), now - self.state_since,
                            remind=self.break_state.level, speech=self.speech_state(), roam=self.roam,
-                           px_per_frame=self.px_per_frame)
+                           px_per_frame=self.px_per_frame, swing=self.swing.direction)
 
     def apply_pose(self):
-        """按当前情况挑立绘；坐着的时候气泡跟着往下挪，贴着头顶。返回 (姿势, 立绘图)。"""
+        """按当前情况挑立绘：站坐之间先播过渡帧，有眼睛补丁的姿势按节奏眨眼；坐着的时候气泡跟着往下挪。
+        返回 (姿势, 立绘图)。"""
+        now = time.time()
         pose = self.current_pose()
-        key = (pose.file, pose.flip)
-        img = self.sprite_image(*key)
-        if key != self.pose_key:
-            if self.pose_key and pose.anchor != self.anchor:
-                self.hop_at = time.time()  # 站起来/坐下去：身体落点差了一截，蹦一下盖过那一下突兀的跳变
-            self.pose_key, self.anchor = key, pose.anchor
+        if self.roam:
+            self.posture, pose = settle(self.posture, pose, now)
+        blink = pose.file in self.patches and eyes_closed(self.blink, now)
+        img = self.sprite_image(pose.file, pose.flip, blink)
+        self.pose_key, self.anchor = (pose.file, pose.flip, blink), pose.anchor
         self.bubble_dy = round((1 - pose.anchor) * img.height)
         return pose, img
 
@@ -621,7 +650,7 @@ class Pet:
 
     def can_wander(self):
         return (self.drag is None and not self.break_state.level and not self.speech_state()
-                and self.claude_state() in ('waiting', 'idle'))
+                and self.claude_state() == 'waiting')  # 发呆久了就睡着了，不溜达
 
     def update_motion(self, now, dt):
         follow = self.follow_surface()
@@ -636,8 +665,10 @@ class Pet:
                                can_wander=self.can_wander())
 
     def bob_for(self, file, t):
-        if file in ('stone', 'jump', 'land') or file.startswith('walk'):
-            return 0  # 走路立绘自带身体的起伏，不能再叠加
+        if file in ('stone', 'jump', 'land', 'fall', 'held', 'held-swing') or file.startswith(('walk', 'sit-down')):
+            return 0  # 走路、过渡、悬空的立绘自带动作，不能再叠加起伏
+        if file.startswith('sleep'):
+            return 1.0 * math.sin(t * 1.6)          # 打瞌睡：慢慢地呼吸
         if file == 'remind-3':
             return -7 * abs(math.sin(t * 4))        # 急了：原地一下一下跺脚
         if file == 'remind-2':
@@ -660,6 +691,9 @@ class Pet:
             self.update_motion(t, dt)
         if self.hidden:
             return  # 藏起来的时候不用合成画面
+        self.blink = step_blink(self.blink, t, random)
+        held = self.roam and self.motion is not None and self.motion.mode == 'held'
+        self.swing = swing_step(self.swing, self.throw_velocity()[0], t, SWING_V * self.scale) if held else Swing()
         pose, img = self.apply_pose()
         since = t - self.hop_at
         hop = -14 * math.sin(since / 0.28 * math.pi) if since < 0.28 else 0  # 换状态时小跳一下
@@ -671,6 +705,10 @@ class Pet:
             text = self.text + '.' * (int(t * 2.5) % 3 + 1)  # “思考中” 后面的点点点一跳一跳
         image = compose(img, sprite_bottom, self.bubble_for(text), self.bubble_h + self.bubble_dy,
                         self.min_w, self.H)
+        if pose.file.startswith('sleep'):  # z Z 从头顶右边冒出来
+            top = sprite_bottom - img.height
+            draw_marks(image, zz_marks(t, self.scale), image.width // 2 + round(img.width * 0.22),
+                       top + round(img.height * 0.12))
         self.fit_width(image.width)
         if self.roam and self.motion and self.drag is None:
             self.put_window(self.motion.x, self.motion.y)
