@@ -1,6 +1,7 @@
 """一帧画面：立绘 + 气泡，合成一张带透明度的图（RGBA）。纯 PIL，不碰窗口。"""
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 
 from PIL import Image, ImageDraw, ImageFont
@@ -15,6 +16,7 @@ SS = 3                      # 气泡的形状按 3 倍画再缩小，边缘才�
 FONT_FILE, FONT_INDEX = 'msyh.ttc', 1   # Microsoft YaHei UI
 
 
+@functools.lru_cache(maxsize=16)
 def _font(px: int):
     try:
         return ImageFont.truetype(FONT_FILE, px, index=FONT_INDEX)
@@ -93,3 +95,13 @@ def compose(sprite: Image.Image, sprite_bottom: int, bubble: Image.Image | None,
     if bubble is not None:
         paste(out, bubble, w // 2 - bubble.width // 2, bubble_bottom - bubble.height)
     return out
+
+
+def draw_marks(image: Image.Image, marks: list, x: float, y: float) -> None:
+    """把 z Z 这类小记号画到 image 上（就地修改）。(x, y) 是记号飘出来的起点，marks 来自 effects。"""
+    layer = Image.new('RGBA', image.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    for m in marks:
+        if m.alpha > 0:
+            d.text((x + m.dx, y + m.dy), m.text, font=_font(m.size), fill=INK[:3] + (m.alpha,))
+    image.alpha_composite(layer)

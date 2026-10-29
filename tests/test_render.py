@@ -7,7 +7,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from PIL import Image, ImageFont  # noqa: E402
 
 from bubble import BubbleLayout  # noqa: E402
-from render import BubbleStyle, bubble_image, compose, paste  # noqa: E402
+from render import BubbleStyle, bubble_image, compose, draw_marks, paste  # noqa: E402
+from effects import Mark  # noqa: E402
 
 STYLE = BubbleStyle(font=ImageFont.load_default(13), small=ImageFont.load_default(11), scale=1.0)
 
@@ -87,6 +88,20 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual(out.getpixel((20, 30))[3], 0)
         self.assertEqual(out.getpixel((9, 25))[3], 0)
         self.assertEqual(out.getpixel((10, 25))[3], 255)
+
+
+class DrawMarksTest(unittest.TestCase):
+    def test_draws_near_the_origin(self):
+        im = Image.new('RGBA', (80, 80), (0, 0, 0, 0))
+        draw_marks(im, [Mark('Z', 0.0, 0.0, 255, 20)], 30, 30)
+        box = im.getchannel('A').getbbox()
+        self.assertIsNotNone(box)
+        self.assertTrue(25 <= box[0] <= 40 and 25 <= box[1] <= 45, box)
+
+    def test_invisible_mark_draws_nothing(self):
+        im = Image.new('RGBA', (80, 80), (0, 0, 0, 0))
+        draw_marks(im, [Mark('Z', 0.0, 0.0, 0, 20)], 30, 30)
+        self.assertIsNone(im.getchannel('A').getbbox())
 
 
 if __name__ == '__main__':
