@@ -22,7 +22,8 @@ from PIL import Image, ImageOps, ImageTk
 
 from breaks import ACK_LINES, BreakConfig, BreakEvent, BreakState, acknowledge, is_night, pick_line, step
 from motion import (
-    FIXED_SPRITES, WALK_FRAMES, Motion, Surface, choose_pose, choose_surface, spawn, tick, walk_to,
+    FIXED_SPRITES, WALK_FRAMES, build_surfaces, choose_pose, choose_surface, hold, hop_to, release, spawn, tick,
+    walk_to,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -227,9 +228,12 @@ class Pet:
 
         self.roam = self.settings.get('roam', True) is not False
         self.motion = None             # 走动模式下她的位置和动作
-        self.target_hwnd = None        # 她现在坐着的窗口
+        self.following = self.settings.get('follow', True) is not False  # 自动跟着当前窗口；被你拖走后暂停
+        self.target_hwnd = None        # 当前窗口（前台窗口稳定之后才算），"跟着当前窗口"时她要去它那儿
         self.candidate = None          # (窗口, 开始当前台的时刻)：稳定了才换
-        self.work_area = winapi.primary_work_area()
+        self.work_areas = winapi.monitor_work_areas()
+        self.surfaces = []             # 此刻所有的地板（每 0.25 秒刷新）
+        self.drag_samples = []         # 拖动时最近几次的 (时刻, x, y)，松手时用来算甩出去的速度
         self.win_pos = None
         self.last_frame = time.time()
         self.bubble_dy = 0
@@ -376,6 +380,8 @@ class Pet:
         self.menu.add_cascade(label='大小', menu=size_menu)
         self.roam_var = tk.BooleanVar(value=self.roam)
         self.menu.add_checkbutton(label='跟着窗口走动', variable=self.roam_var, command=self.toggle_roam)
+        self.follow_var = tk.BooleanVar(value=self.following)
+        self.menu.add_checkbutton(label='自动跟着当前窗口', variable=self.follow_var, command=self.toggle_follow)
         self.hide_var = tk.BooleanVar(value=self.settings.get('hideOnFocus', False))
         self.menu.add_checkbutton(label='切到 Claude 时自动隐藏', variable=self.hide_var, command=self.toggle_hide)
         self.sound_var = tk.BooleanVar(value=self.settings.get('sound', True))
@@ -415,6 +421,17 @@ class Pet:
         save_settings(self.settings)
         self.win_pos = None
         self.refresh()
+
+    def set_following(self, on, announce=False):
+        self.following = on
+        self.settings['follow'] = on
+        save_settings(self.settings)
+        self.follow_var.set(on)
+        if announce:
+            self.say('我就待在这儿啦～', 3.0)
+
+    def toggle_follow(self):
+        self.set_following(self.follow_var.get())
 
     def toggle_hide(self):
         self.settings['hideOnFocus'] = self.hide_var.get()
@@ -482,30 +499,43 @@ class Pet:
     def on_press(self, e):
         self.drag = (e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y())
         self.press_at, self.moved = (e.x_root, e.y_root), False
+        self.drag_samples = []
 
     def on_drag(self, e):
-        if self.drag:
-            if abs(e.x_root - self.press_at[0]) + abs(e.y_root - self.press_at[1]) > 4:
-                self.moved = True
-            self.root.geometry(f'+{e.x_root - self.drag[0]}+{e.y_root - self.drag[1]}')
+        if not self.drag:
+            return
+        if abs(e.x_root - self.press_at[0]) + abs(e.y_root - self.press_at[1]) > 4:
+            self.moved = True
+        x, y = e.x_root - self.drag[0], e.y_root - self.drag[1]
+        self.root.geometry(f'+{x}+{y}')
+        if self.moved and self.roam and self.motion:
+            feet = (x + self.W / 2, y + self.line_y)
+            self.motion = hold(self.motion, *feet)  # 她被你拎起来了：位置完全跟着光标走
+            self.drag_samples = (self.drag_samples + [(time.time(), *feet)])[-6:]
+
+    def throw_velocity(self):
+        """松手那一刻甩出去的速度（像素/秒）：看最近一小段拖动。"""
+        samples = [s for s in self.drag_samples if time.time() - s[0] < 0.12]
+        if len(samples) < 2 or samples[-1][0] - samples[0][0] < 0.02:
+            return 0.0, 0.0
+        dt = samples[-1][0] - samples[0][0]
+        limit = 1600 * self.scale
+        clamp = lambda v: max(-limit, min(limit, v))  # noqa: E731
+        return clamp((samples[-1][1] - samples[0][1]) / dt), clamp((samples[-1][2] - samples[0][2]) / dt)
 
     def on_release(self, e):
         self.drag = None
         if self.roam:
-            if self.moved and self.motion:
-                self.motion = self.dropped()  # 被你拎到别处了：松手后她跳回窗口上
+            if self.moved and self.motion and self.motion.mode == 'held':
+                self.motion = release(self.motion, *self.throw_velocity())  # 松手：自由落体，落在下面第一块地板上
+                if self.following:
+                    self.set_following(False, announce=True)  # 你把她放在哪儿，她就待在哪儿，不会自己跑回去
             self.win_pos = None
         else:
             self.settings['x'], self.settings['y'] = self.root.winfo_x(), self.root.winfo_y()
             save_settings(self.settings)
         if not self.moved and self.break_state.level:
             self.acknowledge_break()  # 提醒的时候点她一下，就是"我去休息了"
-
-    def dropped(self):
-        x, y = self.root.winfo_x() + self.W / 2, self.root.winfo_y() + self.line_y
-        nowhere = Surface(key=None, left=x, right=x, y=y, kind='dropped')  # 平面对不上，下一帧就会起跳
-        return Motion(mode='perch', x=x, y=y, frac=self.motion.frac, surface=nowhere, face=self.motion.face,
-                      next_wander=time.time() + 15)
 
     def on_double(self, e):
         # 双击：把 Claude 窗口叫到前台
@@ -537,10 +567,11 @@ class Pet:
         self.root.after(250, self.poll)
 
     def watch_surface(self):
-        """决定她该坐哪个窗口：前台窗口稳定 SETTLE_S 秒才换；坐着的窗口没了就立刻换。"""
+        """每 0.25 秒：刷新所有地板，并找出"当前窗口"——前台窗口稳定 SETTLE_S 秒才算，Alt+Tab 路过的不算。"""
         try:
             now = time.time()
-            self.work_area = winapi.primary_work_area()
+            self.work_areas = winapi.monitor_work_areas()
+            self.surfaces = build_surfaces(winapi.visible_windows(os.getpid()), self.work_areas)
             win = winapi.foreground_window(os.getpid())
             if win is None:
                 self.candidate = None
@@ -552,26 +583,41 @@ class Pet:
             elif now - self.candidate[1] >= SETTLE_S:
                 self.target_hwnd, self.candidate = win.hwnd, None
             if self.target_hwnd and winapi.window_info(self.target_hwnd) is None:
-                self.target_hwnd = win.hwnd if win else None  # 她坐的窗口关了/最小化了
+                self.target_hwnd = win.hwnd if win else None  # 当前窗口关了/最小化了
         except Exception:
             log_error()
         finally:
             self.root.after(250, self.watch_surface)
 
-    def surface_now(self):
+    def follow_surface(self):
+        """"跟着当前窗口"时她该去的地方：当前窗口的顶边；上方放不下就是屏幕底边（限在这个窗口的左右范围内）。"""
         win = winapi.window_info(self.target_hwnd) if self.target_hwnd else None
-        return choose_surface(win, self.work_area, need_above=self.line_y)
+        return choose_surface(win, self.work_areas[0], need_above=self.line_y)
+
+    def fresh_surfaces(self, follow):
+        """地板列表。她脚下这块每帧都重新量一次，拖动窗口时她才不会慢半拍；窗口最大化、最小化了就从列表里消失，
+        她就掉下去。"""
+        surfaces = [s for s in self.surfaces if s.key != follow.key]
+        support = self.motion.support if self.motion else None
+        if isinstance(support, int) and support != follow.key:
+            info = winapi.window_info(support)
+            surfaces = [s for s in surfaces if s.key != support] + (build_surfaces([info], []) if info else [])
+        return surfaces + [follow]
 
     def can_wander(self):
         return (self.drag is None and not self.break_state.level and not self.speech_state()
                 and self.claude_state() in ('waiting', 'idle'))
 
     def move(self, now, dt):
-        surface = self.surface_now()
+        follow = self.follow_surface()
         if self.motion is None:
-            self.motion = spawn(surface, 0.8, now)  # 一开始就坐在窗口靠右的位置
+            ground = choose_surface(None, self.work_areas[0], need_above=self.line_y)
+            self.motion = spawn(follow if self.following else ground, 0.8, now)  # 一开始待在当前窗口靠右的位置
         else:
-            self.motion = tick(self.motion, surface, now, dt, speed=self.speed, scale=self.scale,
+            m = self.motion
+            if self.following and m.mode in ('perch', 'walk') and m.support != follow.key:
+                m = hop_to(m, follow, now, self.scale)  # 你切到了别的窗口：她跳过去
+            self.motion = tick(m, self.fresh_surfaces(follow), now, dt, speed=self.speed, scale=self.scale,
                                can_wander=self.can_wander())
         if self.drag is None and not self.hidden:
             self.put_window(self.motion.x, self.motion.y)

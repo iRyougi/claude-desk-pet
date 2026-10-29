@@ -101,6 +101,41 @@ def window_info(hwnd: int) -> WinInfo | None:
     return WinInfo(hwnd=int(hwnd), rect=rect, work=work_area_of(hwnd), maximized=bool(user32.IsZoomed(hwnd)))
 
 
+WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+MONITORENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HANDLE, wt.HDC, ctypes.POINTER(wt.RECT), wt.LPARAM)
+user32.EnumDisplayMonitors.argtypes = [wt.HDC, ctypes.POINTER(wt.RECT), MONITORENUMPROC, wt.LPARAM]
+
+
+def visible_windows(own_pid: int) -> list:
+    """所有能当"地板"的窗口，从最上层到最下层（不含她自己的窗口）。"""
+    found = []
+
+    def collect(hwnd, _):
+        if _pid(hwnd) != own_pid:
+            info = window_info(hwnd)
+            if info is not None:
+                found.append(info)
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(collect), 0)
+    return found
+
+
+def monitor_work_areas() -> list:
+    """每块显示器的工作区（不含任务栏）。枚举失败就退回主显示器。"""
+    areas = []
+
+    def collect(monitor, hdc, rect, _):
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            areas.append(_rect(info.rcWork))
+        return True
+
+    user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(collect), 0)
+    return areas or [primary_work_area()]
+
+
 def foreground_window(own_pid: int) -> WinInfo | None:
     """前台窗口。是她自己的窗口、桌面、任务栏之类的，返回 None（调用方继续待在原来的窗口上）。"""
     hwnd = user32.GetForegroundWindow()
