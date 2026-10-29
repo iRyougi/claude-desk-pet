@@ -262,14 +262,13 @@ export const register: Register = on => {
     const head = args.split(/\s+/)[0].toLowerCase()
     if (!PET_COMMANDS.has(head)) return { text: PET_HELP }
     try {
-      await launchPet($) // 已经开着的话不会开第二个
+      if (head !== 'quit' && head !== 'hide') await launchPet($) // 已经开着的话不会开第二个；退出/藏起来没必要现拉起一个
       await sendPetCommand($, args)
     } catch (err) {
       $.ui.log(`桌宠命令失败：${String(err)}`, { to: 'debug' })
       return { text: '桌宠没有响应，看看 ~/.claude/desk-pet/mod-launch.log' }
     }
     if (args === '') {
-      await pet($, 'waiting', '我在这儿～')
       return { text: '桌宠已召唤（如果它本来就开着，就不会再开第二个）。输入 /pet help 看还能做什么。' }
     }
     return { text: `已告诉桌宠：/pet ${args}` }
